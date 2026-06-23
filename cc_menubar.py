@@ -5,6 +5,7 @@ import json
 import math
 import os
 import plistlib
+import ssl
 import sys
 import threading
 import time
@@ -13,6 +14,14 @@ import urllib.request
 import webbrowser
 from datetime import datetime
 from pathlib import Path
+
+# Ship our own CA bundle — py2app's bundled Python can't read the system
+# trust store, so urllib HTTPS fails with "Could not reach…" without this.
+try:
+    import certifi
+    _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+except Exception:
+    _SSL_CONTEXT = ssl.create_default_context()
 
 import AppKit
 import objc
@@ -434,7 +443,7 @@ def fetch_latest_release() -> tuple[str, str] | None:
                 "User-Agent": "MenubarCC-update-check",
             },
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with urllib.request.urlopen(req, timeout=10, context=_SSL_CONTEXT) as resp:
             data = json.loads(resp.read())
         return (data.get("tag_name", ""), data.get("html_url", "") or GITHUB_RELEASES_URL)
     except Exception:
@@ -647,9 +656,6 @@ class CCApp(rumps.App):
         summary = f"Today  {len(ss)} sessions · {self._tool_count} tool calls"
         items.append(make_header(summary))
         items.append(None)
-        items.append(rumps.MenuItem("Check for Updates…", callback=self._check_updates))
-        items.append(None)
-
         # Top-level Tailscale-style toggle for quick mute control
         cfg = load_hook_config()
         muted = bool(cfg.get("muteAll", False))
@@ -670,6 +676,7 @@ class CCApp(rumps.App):
 
         items.append(self._build_advanced_menu())
         items.append(None)
+        items.append(rumps.MenuItem("Check for Updates…", callback=self._check_updates))
         items.append(rumps.MenuItem("Quit", callback=rumps.quit_application))
 
         self.menu.clear()
