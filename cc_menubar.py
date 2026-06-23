@@ -53,11 +53,20 @@ SPEED_PRESETS: list[tuple[str, float]] = [
 ]
 DEFAULT_ANIM_FPS = 0.12
 
-# Hook events MenubarCC controls. The label is shown in the menu.
+# Hook events that surface in the menu (user can toggle / pick a sound for these).
 CONTROLLED_HOOK_EVENTS: list[tuple[str, str]] = [
     ("Stop",              "Stop (response end)"),
     ("Notification",      "Notification"),
     ("PermissionRequest", "Permission Request"),
+]
+
+# Every event we register in ~/.claude/settings.json on Install. The two extra
+# events (UserPromptSubmit, SessionEnd) are silent — they exist only to keep
+# the ~/.claude/sessions/<sid>.waiting flag in sync so the crab bounces while
+# Claude is waiting for the user.
+INSTALLED_HOOK_EVENTS: list[str] = [e for e, _ in CONTROLLED_HOOK_EVENTS] + [
+    "UserPromptSubmit",
+    "SessionEnd",
 ]
 
 
@@ -281,7 +290,7 @@ def hooks_are_installed() -> bool:
     hooks_root = settings.get("hooks") or {}
     return all(
         _hooks_section_has_menubarcc(hooks_root.get(event) or [])
-        for event, _ in CONTROLLED_HOOK_EVENTS
+        for event in INSTALLED_HOOK_EVENTS
     )
 
 
@@ -303,7 +312,7 @@ def install_hooks() -> tuple[bool, str]:
         hooks_root = dict(settings.get("hooks") or {})
 
         command = _hook_command_for_event()
-        for event, _ in CONTROLLED_HOOK_EVENTS:
+        for event in INSTALLED_HOOK_EVENTS:
             section = list(hooks_root.get(event) or [])
             if not _hooks_section_has_menubarcc(section):
                 section.append({

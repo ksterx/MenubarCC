@@ -2,8 +2,16 @@
 """
 MenubarCC hook bridge.
 
-Invoked by Claude Code as a hook command. Reads the JSON event from stdin,
-consults the MenubarCC config, and plays the appropriate sound via afplay.
+Invoked by Claude Code as a hook command. Reads the JSON event from stdin
+and does two things:
+
+1. Maintain ``~/.claude/sessions/<session_id>.waiting`` so the menu bar app
+   can show the bouncing "input waiting" animation:
+       - Stop              → touch the flag (Claude finished, awaiting input)
+       - UserPromptSubmit  → remove the flag (user replied — back to busy)
+       - SessionEnd        → remove the flag (no longer relevant)
+
+2. Play a sound for SOUND_EVENTS, subject to the user's config.
 
 Config: ~/Library/Application Support/com.ksterx.MenubarCC/hook-config.json
     {
@@ -28,6 +36,7 @@ CONFIG_PATH = (
     / "com.ksterx.MenubarCC"
     / "hook-config.json"
 )
+SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 
 # Default sounds shipped with macOS — no bundled assets required.
 DEFAULT_SOUNDS: dict[str, str] = {
@@ -36,7 +45,14 @@ DEFAULT_SOUNDS: dict[str, str] = {
     "PermissionRequest": "/System/Library/Sounds/Funk.aiff",
 }
 
-SUPPORTED_EVENTS = set(DEFAULT_SOUNDS.keys())
+# Events that may play a sound (user-controllable in the menu)
+SOUND_EVENTS = set(DEFAULT_SOUNDS.keys())
+
+# Events that drive the .waiting flag (silent — no sound, no menu entry)
+FLAG_EVENTS = {"Stop", "UserPromptSubmit", "SessionEnd"}
+
+# Every event we accept on stdin
+SUPPORTED_EVENTS = SOUND_EVENTS | FLAG_EVENTS
 
 
 def _load_config() -> dict:
@@ -48,6 +64,22 @@ def _load_config() -> dict:
         return data if isinstance(data, dict) else {}
     except Exception:
         return {}
+
+
+def _update_waiting_flag(event: str, payload: dict) -> None:
+    """Touch / remove ~/.claude/sessions/<sid>.waiting based on the event."""
+    sid = payload.get("session_id") or payload.get("sessionId")
+    if not isinstance(sid, str) or not sid:
+        return
+    flag = SESSIONS_DIR / f"{sid}.waiting"
+    try:
+        if event == "Stop":
+            SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+            flag.touch(exist_ok=True)
+        elif event in ("UserPromptSubmit", "SessionEnd"):
+            flag.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 
 def _resolve_sound_path(event: str, cfg: dict) -> str | None:
@@ -70,6 +102,16 @@ def main() -> None:
         payload = json.loads(raw)
         event = payload.get("hook_event_name", "")
         if event not in SUPPORTED_EVENTS:
+            sys.exit(0)
+
+        # Update the input-waiting flag for whichever event drives it.
+        # This is always done, independent of mute/per-event settings —
+        # muting "sound" should not disable the bouncing-crab animation.
+        if event in FLAG_EVENTS:
+            _update_waiting_flag(event, payload)
+
+        # Only sound events go through the sound pipeline.
+        if event not in SOUND_EVENTS:
             sys.exit(0)
 
         cfg = _load_config()
