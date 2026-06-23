@@ -35,7 +35,7 @@ REFRESH_SECS = 10
 # ── フレーム生成 ──────────────────────────────────────────────────────────────
 
 def build_frames(crab: Image.Image) -> dict:
-    FRAMES_DIR.mkdir(exist_ok=True)
+    FRAMES_DIR.mkdir(parents=True, exist_ok=True)
     # 透明パディングを除いた実際のカニ領域だけ使う
     bbox = crab.getbbox()
     if bbox:
