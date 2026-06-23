@@ -8,8 +8,8 @@ OPTIONS = {
         "CFBundleName": "MenubarCC",
         "CFBundleDisplayName": "MenubarCC",
         "CFBundleIdentifier": "com.ksterx.MenubarCC",
-        "CFBundleVersion": "1.0.0",
-        "CFBundleShortVersionString": "1.0",
+        "CFBundleVersion": "1.1.0",
+        "CFBundleShortVersionString": "1.1",
         "LSUIElement": True,          # メニューバーのみ（Dockに出ない）
         "NSMicrophoneUsageDescription": "",
     },
