@@ -532,13 +532,13 @@ class CCApp(rumps.App):
         # ── Rebuild menu ─────────────────────────────────────────────
         items: list = []
 
-        def add_section(label: str, sessions: list[dict], icon: str):
+        def add_section(label: str, sessions: list[dict]):
             if not sessions:
                 return
             items.append(make_header(label))
             for s in sessions:
                 items.append(rumps.MenuItem(
-                    f"      {icon}  {s['_dir']}   {fmt_age(s['_age_s'])}"
+                    f"        {s['_dir']}   {fmt_age(s['_age_s'])}"
                 ))
             items.append(None)
 
@@ -546,10 +546,10 @@ class CCApp(rumps.App):
             items.append(rumps.MenuItem("No sessions"))
             items.append(None)
         else:
-            add_section(f"⚠   STUCK  ·  {len(stuck)}",   stuck,   "⚠")
-            add_section(f"↻   ACTIVE  ·  {len(busy)}",   busy,    "↻")
-            add_section(f"💬  WAITING  ·  {len(waiting)}", waiting, "💬")
-            add_section(f"·   IDLE  ·  {len(idle)}",     idle,    "·")
+            add_section(f"⚠   STUCK   ·  {len(stuck)}",   stuck)
+            add_section(f"⏵   ACTIVE  ·  {len(busy)}",    busy)
+            add_section(f"⏸  WAITING  ·  {len(waiting)}", waiting)
+            add_section(f"·   IDLE    ·  {len(idle)}",    idle)
 
         summary = f"Today  {len(ss)} sessions · {self._tool_count} tool calls"
         items.append(make_header(summary))
