@@ -667,9 +667,9 @@ class CCApp(rumps.App):
         rumps.alert(title="MenubarCC", message=msg)
         self._refresh(None)
 
-    # ── Crab Speed submenu ──────────────────────────────────────────────
+    # ── Speed submenu ──────────────────────────────────────────────────
     def _build_speed_menu(self) -> rumps.MenuItem:
-        root = rumps.MenuItem("Crab Speed")
+        root = rumps.MenuItem("Speed")
         current = self._anim_fps
         # Check the preset closest to the current value
         closest = min(SPEED_PRESETS, key=lambda p: abs(p[1] - current))[1]
