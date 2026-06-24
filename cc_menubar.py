@@ -5,8 +5,11 @@ import json
 import math
 import os
 import plistlib
+import shutil
 import ssl
+import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.error
@@ -65,8 +68,10 @@ HOOK_COMMAND_MARKER  = "menubarcc_hook.py"   # used to detect our entries
 STUCK_SECS   = 600
 REFRESH_SECS = 10
 
-GITHUB_LATEST_API   = "https://api.github.com/repos/ksterx/claude-code-menubar/releases/latest"
-GITHUB_RELEASES_URL = "https://github.com/ksterx/claude-code-menubar/releases"
+# The HTML "latest" endpoint 302-redirects to /releases/tag/<tag>. Unlike the
+# JSON API it is not rate-limited per IP, so update checks never hit HTTP 403.
+GITHUB_LATEST_REDIRECT = "https://github.com/ksterx/claude-code-menubar/releases/latest"
+GITHUB_RELEASES_URL    = "https://github.com/ksterx/claude-code-menubar/releases"
 
 # Delay before the first-run install prompt so the menu bar icon
 # appears first and the user knows which app is asking.
@@ -502,20 +507,150 @@ def compare_versions(a: str, b: str) -> int:
 
 
 def fetch_latest_release() -> tuple[str, str] | None:
-    """Hit the GitHub API. Returns (tag, html_url) or None on any failure."""
+    """Resolve the latest release tag via the rate-limit-free HTML redirect.
+
+    Returns (tag, html_url) or None on failure. We only read the redirected
+    URL, not the page body, so this stays cheap.
+    """
     try:
         req = urllib.request.Request(
-            GITHUB_LATEST_API,
-            headers={
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "MenubarCC-update-check",
-            },
+            GITHUB_LATEST_REDIRECT,
+            headers={"User-Agent": "MenubarCC-update-check"},
         )
         with urllib.request.urlopen(req, timeout=10, context=_SSL_CONTEXT) as resp:
-            data = json.loads(resp.read())
-        return (data.get("tag_name", ""), data.get("html_url", "") or GITHUB_RELEASES_URL)
+            final_url = resp.geturl()
+        # …/releases/tag/v1.4.0  →  v1.4.0   (no /tag/ means there's no release)
+        if "/releases/tag/" not in final_url:
+            return None
+        tag = final_url.rstrip("/").rsplit("/releases/tag/", 1)[-1]
+        if not tag or "/" in tag:
+            return None
+        return (tag, final_url)
     except Exception:
         return None
+
+
+def _dmg_url_for(tag: str) -> str:
+    """Release DMGs follow a fixed naming scheme: MenubarCC-<version>.dmg."""
+    version = tag.removeprefix("v")
+    return f"{GITHUB_RELEASES_URL}/download/{tag}/MenubarCC-{version}.dmg"
+
+
+# Runs after MenubarCC quits: swap the .app atomically, then relaunch.
+# No literal braces here so str.format only touches the named fields.
+_SWAP_SCRIPT = """#!/bin/bash
+PID={pid}
+NEW="{new}"
+TARGET="{target}"
+TMP="{tmp}"
+BACKUP="$TARGET.old-$$"
+# Wait (up to ~60s) for MenubarCC to actually quit. Swapping a running bundle
+# would corrupt the live process, so if it never exits we abort and leave the
+# current install untouched.
+for _ in $(seq 1 300); do
+  kill -0 "$PID" 2>/dev/null || break
+  sleep 0.2
+done
+if kill -0 "$PID" 2>/dev/null; then
+  rm -rf "$TMP"
+  exit 0
+fi
+if mv "$TARGET" "$BACKUP" 2>/dev/null; then
+  if ditto "$NEW" "$TARGET"; then
+    xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
+    rm -rf "$BACKUP"
+  else
+    # New copy failed mid-way — drop the partial and restore the original.
+    rm -rf "$TARGET"
+    mv "$BACKUP" "$TARGET" 2>/dev/null || true
+  fi
+fi
+# Safety net: never leave the user without an app at the canonical path.
+if [ ! -d "$TARGET" ] && [ -d "$BACKUP" ]; then
+  mv "$BACKUP" "$TARGET" 2>/dev/null || true
+fi
+if [ -d "$TARGET" ]; then
+  open "$TARGET"
+fi
+rm -rf "$TMP"
+"""
+
+
+def perform_update(tag: str) -> str | None:
+    """Download the DMG for `tag`, stage the new .app, and hand off a detached
+    helper that swaps it in once we quit. Returns None on success (caller must
+    then quit the app), or a human-readable error string on failure.
+    """
+    if not getattr(sys, "frozen", False):
+        return "Updates only apply to the installed app, not when run from source."
+
+    bundle = Path(sys.executable).resolve().parents[2]  # …/MenubarCC.app
+    if bundle.suffix != ".app":
+        return "Could not locate the app bundle to update."
+    if not os.access(bundle, os.W_OK) or not os.access(bundle.parent, os.W_OK):
+        return ("No permission to replace the app at\n"
+                f"{bundle}.\nUpdate manually instead.")
+
+    tmp = Path(tempfile.mkdtemp(prefix="menubarcc-update-"))
+    dmg = tmp / "update.dmg"
+    mount = tmp / "mnt"
+    staging = tmp / "staged"
+    handed_off = False  # once the swap helper owns `tmp`, we must not delete it
+    try:
+        req = urllib.request.Request(
+            _dmg_url_for(tag), headers={"User-Agent": "MenubarCC-update-check"}
+        )
+        with urllib.request.urlopen(req, timeout=120, context=_SSL_CONTEXT) as resp, \
+                open(dmg, "wb") as out:
+            shutil.copyfileobj(resp, out)
+
+        mount.mkdir()
+        subprocess.run(
+            ["hdiutil", "attach", str(dmg), "-nobrowse", "-readonly",
+             "-mountpoint", str(mount)],
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        try:
+            apps = list(mount.glob("*.app"))
+            if not apps:
+                return "The downloaded disk image contains no app."
+            staging.mkdir()
+            new_app = staging / apps[0].name
+            subprocess.run(
+                ["ditto", str(apps[0]), str(new_app)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        finally:
+            subprocess.run(
+                ["hdiutil", "detach", str(mount), "-quiet"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+
+        # Strip quarantine so the swapped app launches without a Gatekeeper prompt.
+        subprocess.run(
+            ["xattr", "-dr", "com.apple.quarantine", str(new_app)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+        helper = tmp / "swap.sh"
+        helper.write_text(_SWAP_SCRIPT.format(
+            pid=os.getpid(), new=new_app, target=bundle, tmp=tmp))
+        subprocess.Popen(
+            ["/bin/bash", str(helper)], start_new_session=True,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        handed_off = True
+        return None
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return ("Couldn't find the download for this release. "
+                    "Open the release page to update manually.")
+        return f"Update failed: HTTP {e.code}"
+    except Exception as e:
+        return f"Update failed: {e}"
+    finally:
+        if not handed_off:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class _MainThreadDispatcher(AppKit.NSObject):
@@ -924,7 +1059,7 @@ class CCApp(rumps.App):
                 message="Could not reach GitHub. Check your network connection.",
             )
             return
-        tag, html_url = result
+        tag, _url = result
         if not tag:
             rumps.alert(
                 title="MenubarCC",
@@ -940,12 +1075,36 @@ class CCApp(rumps.App):
         if rumps.alert(
             title=f"MenubarCC {tag} is available",
             message=(
-                f"You're on v{current}. Open the release page to download the new DMG?"
+                f"You're on v{current}. Download and install it now? "
+                "MenubarCC will restart automatically."
             ),
-            ok="Open Release Page",
+            ok="Update Now",
             cancel="Later",
         ) == 1:
-            webbrowser.open(html_url)
+            self._apply_update(tag)
+
+    def _apply_update(self, tag):
+        rumps.notification("MenubarCC", "Updating…",
+                           "Downloading the new version in the background.")
+
+        def worker():
+            err = perform_update(tag)
+            run_on_main(lambda: self._on_update_applied(err))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_update_applied(self, err):
+        if err is None:
+            # Helper is waiting for us to quit, then swaps and relaunches.
+            rumps.quit_application()
+            return
+        if rumps.alert(
+            title="MenubarCC",
+            message=f"{err}\n\nOpen the release page to update manually?",
+            ok="Open Release Page",
+            cancel="Cancel",
+        ) == 1:
+            webbrowser.open(GITHUB_RELEASES_URL)
 
     # ── Notification sound callbacks ───────────────────────────────────
     def _on_notifications_switch(self, switch_on: bool):

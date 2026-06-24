@@ -16,8 +16,8 @@ OPTIONS = {
         "CFBundleName": "MenubarCC",
         "CFBundleDisplayName": "MenubarCC",
         "CFBundleIdentifier": "com.ksterx.MenubarCC",
-        "CFBundleVersion": "1.4.0",
-        "CFBundleShortVersionString": "1.4",
+        "CFBundleVersion": "1.5.0",
+        "CFBundleShortVersionString": "1.5.0",
         "LSUIElement": True,          # メニューバーのみ（Dockに出ない）
         "NSMicrophoneUsageDescription": "",
     },
@@ -27,6 +27,10 @@ OPTIONS = {
         str(PY_LIB / "libffi.8.dylib"),
         str(PY_LIB / "libssl.3.dylib"),
         str(PY_LIB / "libcrypto.3.dylib"),
+        # pyexpat.so (used by plistlib at startup) links @rpath/libexpat.1.dylib;
+        # py2app doesn't pull it in automatically, so bundle it or the app crashes
+        # on launch with "Symbol not found: _XML_SetHashSalt16Bytes".
+        str(PY_LIB / "libexpat.1.dylib"),
     ],
     "iconfile": "MenubarCC.icns",
 }
