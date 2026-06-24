@@ -16,12 +16,12 @@ OPTIONS = {
         "CFBundleName": "MenubarCC",
         "CFBundleDisplayName": "MenubarCC",
         "CFBundleIdentifier": "com.ksterx.MenubarCC",
-        "CFBundleVersion": "1.3.2",
-        "CFBundleShortVersionString": "1.3.2",
+        "CFBundleVersion": "1.4.0",
+        "CFBundleShortVersionString": "1.4",
         "LSUIElement": True,          # メニューバーのみ（Dockに出ない）
         "NSMicrophoneUsageDescription": "",
     },
-    "packages": ["rumps", "PIL", "certifi"],
+    "packages": ["rumps", "PIL", "certifi", "ServiceManagement"],
     "includes": ["AppKit", "Foundation", "ssl"],
     "frameworks": [
         str(PY_LIB / "libffi.8.dylib"),

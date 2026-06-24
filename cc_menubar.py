@@ -28,6 +28,14 @@ import objc
 from PIL import Image, ImageDraw
 import rumps
 
+# ServiceManagement is only available inside a real .app bundle on macOS 13+.
+# Importing it from a dev / source run is fine; the helpers below gracefully
+# return None when no app context is available.
+try:
+    import ServiceManagement
+except ImportError:
+    ServiceManagement = None
+
 
 def _resource(filename: str) -> Path:
     """Resolve a resource path, whether running from an app bundle or source."""
@@ -59,6 +67,10 @@ REFRESH_SECS = 10
 
 GITHUB_LATEST_API   = "https://api.github.com/repos/ksterx/claude-code-menubar/releases/latest"
 GITHUB_RELEASES_URL = "https://github.com/ksterx/claude-code-menubar/releases"
+
+# Delay before the first-run install prompt so the menu bar icon
+# appears first and the user knows which app is asking.
+FIRST_RUN_PROMPT_DELAY = 2.0
 
 # Animation speed presets (seconds per frame). Lower = faster.
 SPEED_PRESETS: list[tuple[str, float]] = [
@@ -401,6 +413,62 @@ def save_app_settings(cfg: dict) -> None:
     _write_json_atomic(APP_SETTINGS_PATH, cfg)
 
 
+# ── Login item (Launch at Login) ─────────────────────────────────────────────
+
+# SMAppService.Status raw values (from <ServiceManagement/SMAppService.h>)
+_SM_STATUS_NOT_REGISTERED   = 0
+_SM_STATUS_ENABLED          = 1
+_SM_STATUS_REQUIRES_APPROVAL = 2
+_SM_STATUS_NOT_FOUND         = 3
+
+
+def _login_item_service():
+    if ServiceManagement is None:
+        return None
+    try:
+        return ServiceManagement.SMAppService.mainAppService()
+    except Exception:
+        return None
+
+
+def login_item_available() -> bool:
+    """True when SMAppService is usable (real bundle on macOS 13+)."""
+    return _login_item_service() is not None and getattr(sys, "frozen", False)
+
+
+def login_item_enabled() -> bool:
+    svc = _login_item_service()
+    if svc is None:
+        return False
+    try:
+        return int(svc.status()) == _SM_STATUS_ENABLED
+    except Exception:
+        return False
+
+
+def set_login_item(enabled: bool) -> tuple[bool, str]:
+    """Register or unregister this app as a login item. Returns (ok, message)."""
+    svc = _login_item_service()
+    if svc is None:
+        return False, "Launch at Login is unavailable in this build."
+    try:
+        if enabled:
+            ok, err = svc.registerAndReturnError_(None)
+        else:
+            ok, err = svc.unregisterAndReturnError_(None)
+    except Exception as e:
+        return False, f"Login item error: {e}"
+    if ok:
+        return True, "Enabled" if enabled else "Disabled"
+    desc = ""
+    if err is not None:
+        try:
+            desc = str(err.localizedDescription())
+        except Exception:
+            desc = str(err)
+    return False, desc or "Unknown error"
+
+
 # ── Update check ─────────────────────────────────────────────────────────────
 
 def get_current_version() -> str:
@@ -568,6 +636,12 @@ class CCApp(rumps.App):
 
         self._refresh(None)           # initial data load
 
+        # First-run: if the hook isn't installed yet, ask the user once.
+        self._first_run_timer = rumps.Timer(
+            self._first_run_tick, FIRST_RUN_PROMPT_DELAY
+        )
+        self._first_run_timer.start()
+
     # ── Animation (interval driven by user-selected speed) ──────────────
     def _animate(self, _):
         state = self._anim_state
@@ -593,14 +667,18 @@ class CCApp(rumps.App):
         idle    = [s for s in ss if s.get("status") == "idle" and not s["_waiting"]]
 
         # ── Decide animation state ───────────────────────────────────
-        if stuck:
+        # Priority: WAITING > STUCK > ACTIVE > IDLE.
+        # WAITING wins because the user can only unblock Claude by replying;
+        # STUCK keeps its title badge so the warning is still visible even
+        # while the crab is bouncing for a different session.
+        if waiting:
+            new_state = "bounce"
+            self.title = f"⚠ {len(stuck)}" if stuck else ""
+        elif stuck:
             new_state = "pulse"
             self.title = f"⚠ {len(stuck)}"
         elif busy:
             new_state = "walk"
-            self.title = ""
-        elif waiting:
-            new_state = "bounce"
             self.title = ""
         else:
             new_state = "idle"
@@ -689,8 +767,28 @@ class CCApp(rumps.App):
         root.add(self._build_sound_menu())
         root.add(self._build_speed_menu())
         root.add(None)
+        root.add(self._build_login_item_entry())
+        root.add(None)
         root.add(self._build_install_menu())
         return root
+
+    # ── Launch at Login ─────────────────────────────────────────────────
+    def _build_login_item_entry(self) -> rumps.MenuItem:
+        if not login_item_available():
+            item = rumps.MenuItem("Launch at Login (run from /Applications)")
+            item.set_callback(None)
+            return item
+        item = rumps.MenuItem("Launch at Login", callback=self._toggle_login_item)
+        item.state = 1 if login_item_enabled() else 0
+        return item
+
+    def _toggle_login_item(self, sender):
+        # state == 1 means currently enabled → user wants to disable it
+        new_value = not bool(sender.state)
+        ok, msg = set_login_item(new_value)
+        if not ok:
+            rumps.alert(title="Launch at Login", message=msg)
+        self._refresh(None)
 
     # ── Notification Sounds submenu ─────────────────────────────────────
     def _build_sound_menu(self) -> rumps.MenuItem:
@@ -721,6 +819,38 @@ class CCApp(rumps.App):
         root.add(rumps.MenuItem("Reset All Custom Sounds", callback=self._reset_all_sounds))
 
         return root
+
+    # ── First-run install prompt ────────────────────────────────────────
+    def _first_run_tick(self, _):
+        # Single-shot — stop ourselves so we don't fire again.
+        self._first_run_timer.stop()
+
+        app_cfg = load_app_settings()
+        if app_cfg.get("installPromptShown", False):
+            return  # already asked once
+        if hooks_are_installed():
+            return  # nothing to do
+
+        # Mark as shown *before* opening the dialog so a crash or force-quit
+        # during the dialog doesn't trap the user in an endless prompt loop.
+        app_cfg["installPromptShown"] = True
+        save_app_settings(app_cfg)
+
+        choice = rumps.alert(
+            title="Welcome to MenubarCC",
+            message=(
+                "MenubarCC can install a small hook into Claude Code so the menu "
+                "bar can control notification sounds and show when Claude is "
+                "waiting for your input. You can also do this later from "
+                "Advanced Settings."
+            ),
+            ok="Install Hook",
+            cancel="Not Now",
+        )
+        if choice == 1:
+            ok, msg = install_hooks()
+            rumps.alert(title="MenubarCC", message=msg)
+            self._refresh(None)
 
     # ── Install / Uninstall submenu ─────────────────────────────────────
     def _build_install_menu(self) -> rumps.MenuItem:
