@@ -65,8 +65,19 @@ HOOK_SCRIPT_INSTALL  = Path.home() / ".claude" / "hooks" / "scripts" / "menubarc
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 HOOK_COMMAND_MARKER  = "menubarcc_hook.py"   # used to detect our entries
 
-STUCK_SECS   = 600
+STUCK_SECS   = 600          # default "stuck" threshold; overridable in settings.json
 REFRESH_SECS = 10
+
+# Stuck detection is on by default; toggleable from Advanced Settings.
+STUCK_DETECTION_DEFAULT = True
+# Selectable "stuck" thresholds for the Advanced Settings menu (label, seconds).
+STUCK_PRESETS: list[tuple[str, int]] = [
+    ("5 minutes",  300),
+    ("10 minutes", 600),
+    ("15 minutes", 900),
+    ("30 minutes", 1800),
+    ("60 minutes", 3600),
+]
 
 # The HTML "latest" endpoint 302-redirects to /releases/tag/<tag>. Unlike the
 # JSON API it is not rate-limited per IP, so update checks never hit HTTP 403.
@@ -181,7 +192,9 @@ def fmt_age(secs: float) -> str:
     return f"{m}m" if m < 60 else f"{m // 60}h{m % 60:02d}m"
 
 
-def load_sessions() -> list[dict]:
+def load_sessions(
+    stuck_secs: int = STUCK_SECS, stuck_enabled: bool = STUCK_DETECTION_DEFAULT
+) -> list[dict]:
     result = []
     for f in SESSIONS_DIR.glob("*.json"):
         try:
@@ -189,7 +202,11 @@ def load_sessions() -> list[dict]:
             age_s = (_now_ms() - d.get("statusUpdatedAt", _now_ms())) / 1000
             sid   = d.get("sessionId", "")
             d["_age_s"]   = age_s
-            d["_stuck"]   = d.get("status") == "busy" and age_s > STUCK_SECS
+            d["_stuck"]   = (
+                stuck_enabled
+                and d.get("status") == "busy"
+                and age_s > stuck_secs
+            )
             d["_waiting"] = (
                 d.get("status") == "idle"
                 and (SESSIONS_DIR / f"{sid}.waiting").exists()
@@ -765,6 +782,12 @@ class CCApp(rumps.App):
         app_cfg = load_app_settings()
         self._anim_fps = float(app_cfg.get("animFps", DEFAULT_ANIM_FPS))
 
+        # Restore stuck-detection prefs (enabled + threshold)
+        self._stuck_enabled = bool(
+            app_cfg.get("stuckEnabled", STUCK_DETECTION_DEFAULT)
+        )
+        self._stuck_secs = int(app_cfg.get("stuckSecs", STUCK_SECS))
+
         # Hold a Timer instance so we can change `interval` at runtime
         self._anim_timer = rumps.Timer(self._animate, self._anim_fps)
         self._anim_timer.start()
@@ -795,7 +818,7 @@ class CCApp(rumps.App):
     # ── Data refresh (every 10s) ─────────────────────────────────────────
     @rumps.timer(REFRESH_SECS)
     def _refresh(self, _):
-        ss      = load_sessions()
+        ss      = load_sessions(self._stuck_secs, self._stuck_enabled)
         stuck   = [s for s in ss if s["_stuck"]]
         busy    = [s for s in ss if s.get("status") == "busy" and not s["_stuck"]]
         waiting = [s for s in ss if s["_waiting"]]
@@ -803,21 +826,18 @@ class CCApp(rumps.App):
 
         # ── Decide animation state ───────────────────────────────────
         # Priority: WAITING > STUCK > ACTIVE > IDLE.
-        # WAITING wins because the user can only unblock Claude by replying;
-        # STUCK keeps its title badge so the warning is still visible even
-        # while the crab is bouncing for a different session.
+        # WAITING wins because the user can only unblock Claude by replying.
+        # The menu-bar title stays empty in every state — "stuck" is signalled
+        # only by the pulsing (alpha-flash) crab, with no count or warning badge.
+        self.title = ""
         if waiting:
             new_state = "bounce"
-            self.title = f"⚠ {len(stuck)}" if stuck else ""
         elif stuck:
             new_state = "pulse"
-            self.title = f"⚠ {len(stuck)}"
         elif busy:
             new_state = "walk"
-            self.title = ""
         else:
             new_state = "idle"
-            self.title = ""
             self.icon  = self._frames["static"]
 
         if new_state != self._anim_state:
@@ -901,6 +921,7 @@ class CCApp(rumps.App):
         root = rumps.MenuItem("Advanced Settings")
         root.add(self._build_sound_menu())
         root.add(self._build_speed_menu())
+        root.add(self._build_stuck_menu())
         root.add(None)
         root.add(self._build_login_item_entry())
         root.add(None)
@@ -1044,6 +1065,25 @@ class CCApp(rumps.App):
             root.add(item)
         return root
 
+    # ── Stuck Detection submenu ─────────────────────────────────────────
+    def _build_stuck_menu(self) -> rumps.MenuItem:
+        root = rumps.MenuItem("Stuck Detection")
+        toggle = rumps.MenuItem(
+            "Detect stuck sessions", callback=self._toggle_stuck_detection
+        )
+        toggle.state = 1 if self._stuck_enabled else 0
+        root.add(toggle)
+        root.add(None)
+        for label, secs in STUCK_PRESETS:
+            item = rumps.MenuItem(
+                label, callback=self._make_set_stuck_secs_callback(secs)
+            )
+            item.state = 1 if secs == self._stuck_secs else 0
+            if not self._stuck_enabled:
+                item.set_callback(None)   # grey out the thresholds while off
+            root.add(item)
+        return root
+
     # ── Update check ────────────────────────────────────────────────────
     def _check_updates(self, _sender):
         def worker():
@@ -1161,6 +1201,24 @@ class CCApp(rumps.App):
             self._anim_timer.start()
             settings = load_app_settings()
             settings["animFps"] = fps
+            save_app_settings(settings)
+            self._refresh(None)
+        return _cb
+
+    # ── Stuck-detection callbacks ───────────────────────────────────────
+    def _toggle_stuck_detection(self, sender):
+        # state == 1 means currently enabled → user wants to turn it off
+        self._stuck_enabled = not bool(sender.state)
+        settings = load_app_settings()
+        settings["stuckEnabled"] = self._stuck_enabled
+        save_app_settings(settings)
+        self._refresh(None)
+
+    def _make_set_stuck_secs_callback(self, secs: int):
+        def _cb(_sender):
+            self._stuck_secs = secs
+            settings = load_app_settings()
+            settings["stuckSecs"] = secs
             save_app_settings(settings)
             self._refresh(None)
         return _cb
