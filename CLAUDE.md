@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-macOS メニューバーアプリ **MenubarCC**（rumps / py2app, arm64, 未署名）。Claude Code の各セッション状態をメニューバーのカニで表示する。
+macOS メニューバーアプリ **MenubarCC**（rumps / py2app, arm64, Developer ID 署名 + Apple 公証）。Claude Code の各セッション状態をメニューバーのカニで表示する。
 
 ## Source
 
@@ -40,6 +40,48 @@ hdiutil create -volname MenubarCC -srcfolder "$STAGING" -ov -format UDZO Menubar
 
 conda-forge の `pyexpat.so` は `@rpath/libexpat.1.dylib` をリンクするが py2app は自動で含めない。未同梱だと起動時に `import plistlib` で `Symbol not found: _XML_SetHashSalt16Bytes` で落ちる。`setup.py` の `frameworks` に `libffi`/`libssl`/`libcrypto` と並べて `libexpat.1.dylib` を入れる（既設定済み）。
 
-### 署名について
+### 署名 + 公証（必須・スキップ厳禁）
 
-アプリは未署名/アドホック。署名は初回起動時の Gatekeeper「開発元が確認できません」警告に効くもので、**DMG のインストール UI とは無関係**。インストール UI が出ない問題は必ず上記 DMG レイアウトを疑う。
+未署名/アドホックの DMG を配布すると、ダウンロード経由の起動時に **「Apple could not verify "MenubarCC.app" is free of malware」** で Gatekeeper に弾かれる。v1.5.0 / v1.6.0 で実際に発生した。Public repo に出す前に下記を必ず通す:
+
+```sh
+IDENTITY="Developer ID Application: Kosuke Ishikawa (44UPBHBKJV)"
+
+# 1. ビルド直後の rpath 修正対象は4つ
+#    _ctypes/_ssl/_hashlib/pyexpat — それぞれ libffi/libssl/libcrypto/libexpat を参照
+#    libssl 自身も @rpath/libcrypto を引くので付け替え必須
+install_name_tool -change @rpath/libffi.8.dylib    @executable_path/../Frameworks/libffi.8.dylib    "$(find dist/MenubarCC.app -name '_ctypes*.so' | head -1)"
+install_name_tool -change @rpath/libssl.3.dylib    @executable_path/../Frameworks/libssl.3.dylib    "$(find dist/MenubarCC.app -name '_ssl*.so'    | head -1)"
+install_name_tool -change @rpath/libcrypto.3.dylib @executable_path/../Frameworks/libcrypto.3.dylib "$(find dist/MenubarCC.app -name '_ssl*.so'    | head -1)"
+install_name_tool -change @rpath/libcrypto.3.dylib @executable_path/../Frameworks/libcrypto.3.dylib "$(find dist/MenubarCC.app -name '_hashlib*.so'| head -1)"
+install_name_tool -change @rpath/libcrypto.3.dylib @executable_path/../Frameworks/libcrypto.3.dylib  dist/MenubarCC.app/Contents/Frameworks/libssl.3.dylib
+install_name_tool -change @rpath/libexpat.1.dylib  @executable_path/../Frameworks/libexpat.1.dylib  "$(find dist/MenubarCC.app -name 'pyexpat*.so' | head -1)"
+
+# 2. inside-out 署名（--options runtime --timestamp 必須。--deep は不可）
+find dist/MenubarCC.app \( -name '*.so' -o -name '*.dylib' \) -type f -print0 \
+  | xargs -0 -I{} codesign --force --options runtime --timestamp --sign "$IDENTITY" "{}"
+for fw in dist/MenubarCC.app/Contents/Frameworks/*.dylib; do
+  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$fw"
+done
+# Contents/MacOS/ には MenubarCC 本体に加えて `python` も居る。両方署名すること
+for f in dist/MenubarCC.app/Contents/MacOS/*; do
+  codesign --force --options runtime --timestamp --sign "$IDENTITY" "$f"
+done
+codesign --force --options runtime --timestamp --sign "$IDENTITY" dist/MenubarCC.app
+
+# 3. 公証 → staple
+ditto -c -k --keepParent dist/MenubarCC.app /tmp/MenubarCC.zip
+xcrun notarytool submit /tmp/MenubarCC.zip --keychain-profile menubarcc --wait
+xcrun stapler staple dist/MenubarCC.app
+
+# 4. DMG も同様に署名 → 公証 → staple
+codesign --force --sign "$IDENTITY" --timestamp MenubarCC-X.Y.Z.dmg
+xcrun notarytool submit MenubarCC-X.Y.Z.dmg --keychain-profile menubarcc --wait
+xcrun stapler staple MenubarCC-X.Y.Z.dmg
+
+# 最終確認
+spctl --assess --type execute --verbose=2 dist/MenubarCC.app   # → source=Notarized Developer ID
+spctl --assess --type open --context context:primary-signature -v MenubarCC-X.Y.Z.dmg
+```
+
+公証用 App-Specific Password は keychain profile `menubarcc` に保存済み（`xcrun notarytool store-credentials menubarcc --apple-id ... --team-id 44UPBHBKJV` で登録）。
