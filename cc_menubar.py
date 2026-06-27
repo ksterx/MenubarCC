@@ -55,6 +55,7 @@ FRAMES_DIR   = Path.home() / "Library" / "Caches" / "com.ksterx.MenubarCC" / "fr
 APP_SUPPORT_DIR   = Path.home() / "Library" / "Application Support" / "com.ksterx.MenubarCC"
 APP_SETTINGS_PATH = APP_SUPPORT_DIR / "settings.json"     # app-only prefs (animFps)
 HOOK_CONFIG_PATH  = APP_SUPPORT_DIR / "hook-config.json"  # shared with menubarcc_hook.py
+APP_SOUNDS_DIR    = APP_SUPPORT_DIR / "sounds"            # copies of user-picked sounds
 
 # Where the hook bridge gets installed. Both the script and the Claude Code
 # settings file live under ~/.claude.
@@ -264,6 +265,33 @@ def update_hook_config(**changes) -> None:
         else:
             cfg[key] = value
     save_hook_config(cfg)
+
+
+def _copy_sound_into_app_support(src: str, event_name: str) -> str | None:
+    """Copy a user-picked sound into APP_SOUNDS_DIR/<event>.<ext>.
+
+    Returns the destination path on success so callers can store it in
+    ``soundPaths``. Any previous copy for the same event (of any extension)
+    is removed first, so picking a new sound replaces the old one cleanly.
+    """
+    try:
+        src_path = Path(src).expanduser()
+        if not src_path.is_file():
+            return None
+        APP_SOUNDS_DIR.mkdir(parents=True, exist_ok=True)
+        for old in APP_SOUNDS_DIR.glob(f"{event_name}.*"):
+            try:
+                old.unlink()
+            except Exception:
+                pass
+        ext = src_path.suffix.lower() or ".aiff"
+        dst = APP_SOUNDS_DIR / f"{event_name}{ext}"
+        # shutil.copy (not copy2): we don't want BSD chflags from system
+        # sources like /System/Library/Sounds — those raise EPERM.
+        shutil.copy(src_path, dst)
+        return str(dst)
+    except Exception:
+        return None
 
 
 def is_event_enabled(cfg: dict, event: str) -> bool:
@@ -1124,16 +1152,31 @@ class CCApp(rumps.App):
 
     def _make_choose_sound_callback(self, event_name: str):
         def _cb(_sender):
-            path = self._prompt_sound_file(event_name)
-            if path:
-                update_hook_config(soundPaths={event_name: path})
-                self._refresh(None)
+            src = self._prompt_sound_file(event_name)
+            if not src:
+                return
+            dst = _copy_sound_into_app_support(src, event_name)
+            if dst is None:
+                rumps.alert(
+                    title="MenubarCC",
+                    message="Failed to copy the sound file into MenubarCC's storage.",
+                )
+                return
+            update_hook_config(soundPaths={event_name: dst})
+            self._refresh(None)
         return _cb
 
     def _reset_all_sounds(self, _sender):
         cfg = load_hook_config()
         cfg["soundPaths"] = {event: None for event, _ in CONTROLLED_HOOK_EVENTS}
         save_hook_config(cfg)
+        # Also drop any copies we made so the storage doesn't accumulate cruft.
+        if APP_SOUNDS_DIR.is_dir():
+            for f in APP_SOUNDS_DIR.iterdir():
+                try:
+                    f.unlink()
+                except Exception:
+                    pass
         self._refresh(None)
 
     def _prompt_sound_file(self, event_name: str) -> str | None:
