@@ -15,7 +15,6 @@ import time
 import urllib.error
 import urllib.request
 import webbrowser
-from datetime import datetime
 from pathlib import Path
 
 # Ship our own CA bundle — py2app's bundled Python can't read the system
@@ -50,7 +49,6 @@ def _resource(filename: str) -> Path:
 
 
 SESSIONS_DIR = Path.home() / ".claude" / "sessions"
-PROJECTS_DIR = Path.home() / ".claude" / "projects"
 CRAB_SRC     = _resource("cc-menubar-icon.png")
 FRAMES_DIR   = Path.home() / "Library" / "Caches" / "com.ksterx.MenubarCC" / "frames"
 
@@ -216,33 +214,6 @@ def load_sessions(
         except Exception:
             pass
     return sorted(result, key=lambda x: x.get("updatedAt", 0), reverse=True)
-
-
-def count_today_tools() -> int:
-    today_start = datetime.now().replace(
-        hour=0, minute=0, second=0, microsecond=0
-    ).timestamp()
-    total = 0
-    for jsonl in PROJECTS_DIR.rglob("*.jsonl"):
-        try:
-            if jsonl.stat().st_mtime < today_start:
-                continue
-            with open(jsonl) as f:
-                for line in f:
-                    try:
-                        entry = json.loads(line)
-                        if entry.get("type") == "say":
-                            content = entry.get("message", {}).get("content", [])
-                            if isinstance(content, list):
-                                total += sum(
-                                    1 for b in content
-                                    if isinstance(b, dict) and b.get("type") == "tool_use"
-                                )
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-    return total
 
 
 def make_header(text: str) -> rumps.MenuItem:
@@ -772,8 +743,6 @@ class CCApp(rumps.App):
         self._anim_idx     = 0
         self._anim_state   = "idle"   # "walk" | "bounce" | "pulse" | "idle"
         self._known_stuck: set[str] = set()
-        self._tool_count   = 0
-        self._last_tool_at = 0.0
 
         # Keep NSObject handlers alive while their menu items are mounted
         self._switch_handlers: list = []
@@ -858,12 +827,6 @@ class CCApp(rumps.App):
                 )
         self._known_stuck = {s.get("sessionId", "") for s in stuck}
 
-        # ── Tool-call count (every 60s) ──────────────────────────────
-        now = time.time()
-        if now - self._last_tool_at > 60:
-            self._tool_count  = count_today_tools()
-            self._last_tool_at = now
-
         # ── Rebuild menu ─────────────────────────────────────────────
         items: list = []
 
@@ -886,9 +849,6 @@ class CCApp(rumps.App):
             add_section(f"⏸  WAITING  ·  {len(waiting)}", waiting)
             add_section(f"·   IDLE    ·  {len(idle)}",    idle)
 
-        summary = f"Today  {len(ss)} sessions · {self._tool_count} tool calls"
-        items.append(make_header(summary))
-        items.append(None)
         # Top-level Tailscale-style toggle for quick mute control
         cfg = load_hook_config()
         muted = bool(cfg.get("muteAll", False))
