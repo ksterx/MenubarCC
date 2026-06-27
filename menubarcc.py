@@ -49,7 +49,7 @@ def _resource(filename: str) -> Path:
 
 
 SESSIONS_DIR = Path.home() / ".claude" / "sessions"
-CRAB_SRC     = _resource("cc-menubar-icon.png")
+CRAB_SRC     = _resource("menubarcc-icon.png")
 FRAMES_DIR   = Path.home() / "Library" / "Caches" / "com.ksterx.MenubarCC" / "frames"
 
 APP_SUPPORT_DIR   = Path.home() / "Library" / "Application Support" / "com.ksterx.MenubarCC"

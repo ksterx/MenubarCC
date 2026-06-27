@@ -8,8 +8,8 @@ from setuptools import setup
 # /opt/miniconda3, or anywhere else.
 PY_LIB = Path(sys.executable).resolve().parent.parent / "lib"
 
-APP = ["cc_menubar.py"]
-DATA_FILES = ["cc-menubar-icon.png", "menubarcc_hook.py"]
+APP = ["menubarcc.py"]
+DATA_FILES = ["menubarcc-icon.png", "menubarcc_hook.py"]
 OPTIONS = {
     "argv_emulation": False,
     "plist": {

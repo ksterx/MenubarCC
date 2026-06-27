@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-macOS メニューバーアプリ **MenubarCC**（rumps / py2app, arm64, Developer ID 署名 + Apple 公証）。Claude Code の各セッション状態をメニューバーのカニで表示する。
+macOS メニューバーアプリ **MenubarCC**（rumps / py2app, arm64, Developer ID 署名 + Apple 公証）。Claude Code の各セッション状態をメニューバーのカニ「Clawd」で表示する。
 
 ## Source
 
-- `cc_menubar.py` — メニューバーアプリ本体（rumps）。セッション状態の判定・描画・メニュー・更新確認。
+- `menubarcc.py` — メニューバーアプリ本体（rumps）。セッション状態の判定・描画・メニュー・更新確認。
 - `menubarcc_hook.py` — Claude Code のフックブリッジ。`~/.claude/sessions/<sid>.waiting` フラグの維持と効果音再生。
 - `setup.py` — py2app ビルド設定（バージョン・同梱 dylib）。
 

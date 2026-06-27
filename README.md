@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="cc-menubar-icon.png" alt="MenubarCC" height="72">
+<img src="menubarcc-icon.png" alt="MenubarCC" height="72">
 
 # MenubarCC
 
@@ -18,7 +18,7 @@
 
 ---
 
-When you run several **Claude Code** sessions at once, it's hard to keep track of which one is busy, which is waiting for your reply, and which has quietly gotten stuck. MenubarCC puts all of that in your menu bar — Clawd, a single crab whose animation tells you the state of your work, plus a sound when a session finishes or needs you.
+When you run several **Claude Code** sessions at once, it's hard to keep track of which one is busy, which is waiting for your reply, and which has quietly gotten stuck. MenubarCC puts all of that in your menu bar — Clawd's animation tells you the state of your work, plus a sound when a session finishes or needs you.
 
 No window to manage, no Dock icon — just Clawd, who always knows what's going on.
 
@@ -36,23 +36,23 @@ Clawd animates to match what your sessions are doing. When sessions are in diffe
 <td align="center"><img src="assets/state-waiting.gif" width="200"><br><b>Waiting</b></td>
 </tr>
 <tr>
-<td align="center">The crab <b>walks</b> while Claude is working.</td>
-<td align="center">The crab <b>bounces</b> when Claude has finished and is waiting for your input.</td>
+<td align="center">Clawd <b>walks</b> while Claude is working.</td>
+<td align="center">Clawd <b>bounces</b> when Claude has finished and is waiting for your input.</td>
 </tr>
 <tr>
 <td align="center"><img src="assets/state-stuck.gif" width="200"><br><b>Stuck</b></td>
 <td align="center"><img src="assets/state-idle.png" width="200"><br><b>Idle</b></td>
 </tr>
 <tr>
-<td align="center">The crab <b>pulses</b> when a session has been busy with no updates past your threshold.</td>
-<td align="center">The crab sits <b>still</b> when there's nothing to report.</td>
+<td align="center">Clawd <b>pulses</b> when a session has been busy with no updates past your threshold.</td>
+<td align="center">Clawd sits <b>still</b> when there's nothing to report.</td>
 </tr>
 </table>
 
 ## Features
 
-- 🦀 **Live session status in the menu bar** — one animated crab summarizes every running Claude Code session.
-- 📋 **Session list** — click the crab for every session grouped into **Stuck / Active / Waiting / Idle**, each with its project folder and how long it's been in that state.
+- 🦀 **Live session status in the menu bar** — Clawd summarizes every running Claude Code session in a single animated icon.
+- 📋 **Session list** — click Clawd for every session grouped into **Stuck / Active / Waiting / Idle**, each with its project folder and how long it's been in that state.
 - 🔔 **Notification sounds** — a chime when Claude finishes a response, posts a notification, or asks for permission. Pick your own sound per event, or mute everything from a single switch.
 - ⏱️ **Stuck detection** — get a native notification when a session has been busy with no progress past a threshold you choose (5–60 min, or off).
 - 🚀 **Launch at Login** — start automatically with macOS.
@@ -64,7 +64,7 @@ Clawd animates to match what your sessions are doing. When sessions are in diffe
 
 1. Download the latest **`MenubarCC-x.y.z.dmg`** from the [**Releases**](https://github.com/ksterx/MenubarCC/releases/latest) page.
 2. Open the DMG and drag **MenubarCC** into **Applications**.
-3. Launch it from Applications. The crab appears in your menu bar.
+3. Launch it from Applications. Clawd appears in your menu bar.
 4. On first run, MenubarCC offers to install a small hook into Claude Code (see [How it works](#how-it-works)). Click **Install Hook** — you can also do this later from **Advanced Settings**.
 
 > The app is signed with a Developer ID and notarized by Apple, so it launches without the *"could not verify it is free of malware"* prompt.
@@ -88,14 +88,14 @@ flowchart LR
     HOOK -->|"Stop / Notification / PermissionRequest"| SOUND(["play a sound"])
     SJSON --> APP["MenubarCC polls every 10s"]
     FLAG --> APP
-    APP --> BAR(["animated crab"])
+    APP --> BAR(["Clawd"])
 ```
 
 - **Session status** comes from the `~/.claude/sessions/<id>.json` files Claude Code maintains (`busy` / `idle`, plus the working directory and last-update time).
 - **The hook bridge** (`menubarcc_hook.py`, installed into `~/.claude/settings.json`) does two things:
-  - Maintains a `<id>.waiting` flag so the crab can bounce while Claude waits for you — it's set on `Stop` and cleared when you reply or the session ends.
+  - Maintains a `<id>.waiting` flag so Clawd can bounce while Claude waits for you — it's set on `Stop` and cleared when you reply or the session ends.
   - Plays a sound on `Stop`, `Notification`, and `PermissionRequest` events, according to your settings.
-- **MenubarCC** combines those signals every 10 seconds to decide the crab's animation and rebuild the menu.
+- **MenubarCC** combines those signals every 10 seconds to decide Clawd's animation and rebuild the menu.
 
 Installing the hook makes a **timestamped backup** of `settings.json` first, and only ever adds or removes its own entries. You can uninstall it cleanly at any time from **Advanced Settings**.
 
@@ -117,7 +117,7 @@ Click Clawd to open the menu.
 | Setting | What it does |
 | --- | --- |
 | **Notification Sounds** | Toggle each event (Stop / Notification / Permission Request) on or off, choose a custom sound file for any of them (`mp3`, `wav`, `m4a`, `aiff`, `aac`, `caf`), or reset back to the macOS defaults. |
-| **Speed** | How fast the crab animates — five presets from *Very Slow* to *Very Fast*. |
+| **Speed** | How fast Clawd animates — five presets from *Very Slow* to *Very Fast*. |
 | **Stuck Detection** | Turn stuck detection on/off and pick the threshold: 5, 10, 15, 30, or 60 minutes. |
 | **Launch at Login** | Start MenubarCC automatically with macOS. *(Requires running from `/Applications`.)* |
 | **Install / Uninstall Hook** | Add or cleanly remove the Claude Code hook bridge. |
@@ -146,7 +146,7 @@ python setup.py py2app
 Run from source without bundling:
 
 ```bash
-python cc_menubar.py
+python menubarcc.py
 ```
 
 Producing a distributable, signed, notarized DMG involves a few macOS-specific steps (bundling `libexpat`, `install_name_tool` rpath fixes, inside-out codesigning, and notarization). The full, battle-tested release procedure lives in [`CLAUDE.md`](CLAUDE.md).
@@ -155,7 +155,7 @@ Producing a distributable, signed, notarized DMG involves a few macOS-specific s
 
 | File | Role |
 | --- | --- |
-| [`cc_menubar.py`](cc_menubar.py) | The menu bar app (rumps): state detection, crab animation, menu, settings, updates. |
+| [`menubarcc.py`](menubarcc.py) | The menu bar app (rumps): state detection, Clawd's animation, menu, settings, updates. |
 | [`menubarcc_hook.py`](menubarcc_hook.py) | The Claude Code hook bridge: maintains the `.waiting` flag and plays sounds. |
 | [`setup.py`](setup.py) | py2app build configuration (version, bundled dylibs). |
 
