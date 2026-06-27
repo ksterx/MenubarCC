@@ -596,7 +596,7 @@ if mv "$TARGET" "$BACKUP" 2>/dev/null; then
     xattr -dr com.apple.quarantine "$TARGET" 2>/dev/null || true
     rm -rf "$BACKUP"
   else
-    # New copy failed mid-way — drop the partial and restore the original.
+    # New copy failed mid-way -- drop the partial and restore the original.
     rm -rf "$TARGET"
     mv "$BACKUP" "$TARGET" 2>/dev/null || true
   fi
@@ -669,8 +669,11 @@ def perform_update(tag: str) -> str | None:
         )
 
         helper = tmp / "swap.sh"
-        helper.write_text(_SWAP_SCRIPT.format(
-            pid=os.getpid(), new=new_app, target=bundle, tmp=tmp))
+        helper.write_text(
+            _SWAP_SCRIPT.format(
+                pid=os.getpid(), new=new_app, target=bundle, tmp=tmp),
+            encoding="utf-8",
+        )
         subprocess.Popen(
             ["/bin/bash", str(helper)], start_new_session=True,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
