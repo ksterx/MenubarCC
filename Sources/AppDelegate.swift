@@ -169,7 +169,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let notifItem = NSMenuItem()
         notifItem.view = makeSwitchView(
             title: "Notifications",
-            subtitle: muted ? "Muted" : "On",
             isOn: !muted,
             target: self,
             action: #selector(notificationToggled(_:))
@@ -234,25 +233,19 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - Switch view (Tailscale-style toggle)
 
     private func makeSwitchView(
-        title: String, subtitle: String, isOn: Bool,
+        title: String, isOn: Bool,
         target: AnyObject, action: Selector
     ) -> NSView {
-        let width: CGFloat = 260, height: CGFloat = 40
+        let width: CGFloat = 260, height: CGFloat = 32
         let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
 
         let titleField = NSTextField(labelWithString: title)
-        titleField.frame = NSRect(x: 14, y: 19, width: 180, height: 16)
+        titleField.frame = NSRect(x: 14, y: 8, width: 180, height: 16)
         titleField.font = NSFont.menuFont(ofSize: 13)
         view.addSubview(titleField)
 
-        let subField = NSTextField(labelWithString: subtitle)
-        subField.frame = NSRect(x: 14, y: 4, width: 180, height: 14)
-        subField.font = NSFont.systemFont(ofSize: 10)
-        subField.textColor = NSColor.secondaryLabelColor
-        view.addSubview(subField)
-
         let sw = NSSwitch()
-        sw.frame = NSRect(x: width - 56, y: 9, width: 40, height: 22)
+        sw.frame = NSRect(x: width - 56, y: 5, width: 40, height: 22)
         sw.state = isOn ? .on : .off
         sw.target = target
         sw.action = action
