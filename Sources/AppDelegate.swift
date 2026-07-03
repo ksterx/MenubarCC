@@ -33,6 +33,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var stuckEnabled = true
     private var stuckSecs = defaultStuckSecs
     private var knownStuck: Set<String> = []
+    private var eventsWatcher: DispatchSourceFileSystemObject?
 
     // MARK: - Lifecycle
 
@@ -62,11 +63,75 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             [weak self] _ in self?.refresh()
         }
 
+        UNUserNotificationCenter.current()
+            .requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        syncInstalledHookScript()
+        startEventsWatcher()
+
         refresh()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + firstRunPromptDelay) {
             [weak self] in self?.firstRunCheck()
         }
+    }
+
+    // MARK: - Banner events (spooled by menubarcc_hook.py)
+
+    private func startEventsWatcher() {
+        let fm = FileManager.default
+        try? fm.createDirectory(at: appEventsDir, withIntermediateDirectories: true)
+        // Drop events spooled while the app wasn't running
+        if let stale = try? fm.contentsOfDirectory(atPath: appEventsDir.path) {
+            for f in stale {
+                try? fm.removeItem(at: appEventsDir.appendingPathComponent(f))
+            }
+        }
+        let fd = open(appEventsDir.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        let src = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd, eventMask: .write, queue: .main
+        )
+        src.setEventHandler { [weak self] in self?.drainBannerEvents() }
+        src.setCancelHandler { close(fd) }
+        src.resume()
+        eventsWatcher = src
+    }
+
+    private func drainBannerEvents() {
+        let fm = FileManager.default
+        guard let files = try? fm.contentsOfDirectory(atPath: appEventsDir.path) else { return }
+        for f in files.sorted() where f.hasSuffix(".json") {
+            let url = appEventsDir.appendingPathComponent(f)
+            let data = try? Data(contentsOf: url)
+            try? fm.removeItem(at: url)
+            guard let data = data,
+                  let d = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                continue
+            }
+            showBanner(for: d)
+        }
+    }
+
+    private func showBanner(for event: [String: Any]) {
+        let kind = event["event"] as? String ?? ""
+        let cwd = event["cwd"] as? String ?? ""
+        let dir = cwd.isEmpty ? "" : URL(fileURLWithPath: cwd).lastPathComponent
+        let message = event["message"] as? String ?? ""
+
+        let title: String
+        let body: String
+        switch kind {
+        case "Stop":
+            title = "Claude Code \u{2014} Finished"
+            body = message.isEmpty ? "Waiting for your input" : message
+        case "PermissionRequest":
+            title = "Claude Code \u{2014} Permission request"
+            body = message.isEmpty ? "Waiting for your approval" : message
+        default:
+            title = "Claude Code"
+            body = message.isEmpty ? "Notification" : message
+        }
+        sendNotification(title: title, subtitle: dir, body: body)
     }
 
     // MARK: - Resource path
@@ -112,13 +177,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             statusItem.button?.image = frames.staticFrame
         }
 
-        // Stuck notifications
+        // Stuck notifications (gated by the Banners toggle)
+        let bannersOn = loadHookConfig()["bannersEnabled"] as? Bool ?? true
         for s in stuck where !knownStuck.contains(s.sessionId) {
-            sendNotification(
-                title: "Claude Code \u{2014} Stuck session",
-                subtitle: s.dirName,
-                body: "busy for \(formatAge(s.ageSeconds)) with no updates"
-            )
+            if bannersOn {
+                sendNotification(
+                    title: "Claude Code \u{2014} Stuck session",
+                    subtitle: s.dirName,
+                    body: "busy for \(formatAge(s.ageSeconds)) with no updates"
+                )
+            }
         }
         knownStuck = Set(stuck.map(\.sessionId))
 
@@ -127,7 +195,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func sendNotification(title: String, subtitle: String, body: String) {
         let center = UNUserNotificationCenter.current()
-        center.requestAuthorization(options: [.alert, .sound]) { _, _ in }
         let content = UNMutableNotificationContent()
         content.title = title
         content.subtitle = subtitle
@@ -163,17 +230,28 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             addSection(menu, label: "\u{00B7}   IDLE    \u{00B7}  \(idle.count)", sessions: idle)
         }
 
-        // Notifications toggle
+        // Sound / banner toggles — independent controls
         let cfg = loadHookConfig()
         let muted = cfg["muteAll"] as? Bool ?? false
-        let notifItem = NSMenuItem()
-        notifItem.view = makeSwitchView(
-            title: "Notifications",
+        let banners = cfg["bannersEnabled"] as? Bool ?? true
+
+        let soundsItem = NSMenuItem()
+        soundsItem.view = makeSwitchView(
+            title: "Sounds",
             isOn: !muted,
             target: self,
-            action: #selector(notificationToggled(_:))
+            action: #selector(soundsToggled(_:))
         )
-        menu.addItem(notifItem)
+        menu.addItem(soundsItem)
+
+        let bannersItem = NSMenuItem()
+        bannersItem.view = makeSwitchView(
+            title: "Banners",
+            isOn: banners,
+            target: self,
+            action: #selector(bannersToggled(_:))
+        )
+        menu.addItem(bannersItem)
 
         // Advanced Settings
         menu.addItem(buildAdvancedMenu())
@@ -254,9 +332,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return view
     }
 
-    @objc private func notificationToggled(_ sender: NSSwitch) {
-        let isOn = sender.state == .on
-        updateHookConfig(["muteAll": !isOn])
+    @objc private func soundsToggled(_ sender: NSSwitch) {
+        updateHookConfig(["muteAll": sender.state != .on])
+        refresh()
+    }
+
+    @objc private func bannersToggled(_ sender: NSSwitch) {
+        updateHookConfig(["bannersEnabled": sender.state == .on])
         refresh()
     }
 

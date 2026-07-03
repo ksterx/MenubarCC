@@ -13,9 +13,14 @@ and does two things:
 
 2. Play a sound for SOUND_EVENTS, subject to the user's config.
 
+3. Spool a banner event file into the app's events/ directory so the menu
+   bar app can post a native banner notification. Independent of sound
+   muting — gated only by "bannersEnabled".
+
 Config: ~/Library/Application Support/com.ksterx.MenubarCC/hook-config.json
     {
       "muteAll": false,
+      "bannersEnabled": true,
       "perEventEnabled": {"Stop": true, "Notification": true, "PermissionRequest": true},
       "soundPaths":      {"Stop": null,  "Notification": null,  "PermissionRequest": null}
     }
@@ -26,6 +31,7 @@ Exits 0 in all cases so it never blocks Claude Code's work.
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 
@@ -37,6 +43,7 @@ CONFIG_PATH = (
     / "hook-config.json"
 )
 SESSIONS_DIR = Path.home() / ".claude" / "sessions"
+EVENTS_DIR = CONFIG_PATH.parent / "events"
 
 # Default sounds shipped with macOS — no bundled assets required.
 DEFAULT_SOUNDS: dict[str, str] = {
@@ -82,6 +89,28 @@ def _update_waiting_flag(event: str, payload: dict) -> None:
         pass
 
 
+def _spool_banner_event(event: str, payload: dict, cfg: dict) -> None:
+    """Write an event file for the menu bar app to turn into a banner."""
+    if not bool(cfg.get("bannersEnabled", True)):
+        return
+    try:
+        EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+        data = {
+            "event": event,
+            "sessionId": payload.get("session_id") or payload.get("sessionId") or "",
+            "cwd": payload.get("cwd") or "",
+            "message": payload.get("message") or "",
+            "ts": time.time(),
+        }
+        name = f"{time.time_ns()}-{event}"
+        tmp = EVENTS_DIR / f"{name}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        tmp.replace(EVENTS_DIR / f"{name}.json")  # atomic — never seen half-written
+    except Exception:
+        pass
+
+
 def _resolve_sound_path(event: str, cfg: dict) -> str | None:
     custom = (cfg.get("soundPaths") or {}).get(event)
     if isinstance(custom, str) and custom:
@@ -110,11 +139,14 @@ def main() -> None:
         if event in FLAG_EVENTS:
             _update_waiting_flag(event, payload)
 
-        # Only sound events go through the sound pipeline.
+        # Only user-visible events go through the sound/banner pipeline.
         if event not in SOUND_EVENTS:
             sys.exit(0)
 
         cfg = _load_config()
+
+        # Banner spool is independent of sound muting.
+        _spool_banner_event(event, payload, cfg)
 
         if bool(cfg.get("muteAll", False)):
             sys.exit(0)

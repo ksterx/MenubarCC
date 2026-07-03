@@ -7,6 +7,8 @@ let appSupportDir = home
 private let appSettingsPath = appSupportDir.appendingPathComponent("settings.json")
 private let hookConfigPath = appSupportDir.appendingPathComponent("hook-config.json")
 let appSoundsDir = appSupportDir.appendingPathComponent("sounds")
+// Banner events spooled by menubarcc_hook.py, consumed by the app.
+let appEventsDir = appSupportDir.appendingPathComponent("events")
 
 private let hookScriptInstall = home
     .appendingPathComponent(".claude/hooks/scripts/menubarcc_hook.py")
@@ -106,6 +108,21 @@ private func sectionHasMenubarCC(_ section: [[String: Any]]) -> Bool {
         }
     }
     return false
+}
+
+/// Overwrite the installed hook script when the bundled one is newer
+/// (changed), so app updates propagate hook changes without a reinstall.
+func syncInstalledHookScript() {
+    let fm = FileManager.default
+    guard fm.fileExists(atPath: hookScriptInstall.path),
+          let bundled = try? Data(contentsOf: hookScriptSource()),
+          let installed = try? Data(contentsOf: hookScriptInstall),
+          bundled != installed else { return }
+    try? bundled.write(to: hookScriptInstall)
+    try? fm.setAttributes(
+        [.posixPermissions: 0o755],
+        ofItemAtPath: hookScriptInstall.path
+    )
 }
 
 func hooksAreInstalled() -> Bool {

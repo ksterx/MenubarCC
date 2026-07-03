@@ -11,7 +11,7 @@ macOS メニューバーアプリ **MenubarCC**（Swift / AppKit, arm64, Develop
   - `FrameGenerator.swift` — カニ PNG から walk/bounce/pulse/static アニメーションフレームを CoreGraphics で生成。
   - `HookManager.swift` — Claude Code フックの install/uninstall、JSON 設定ファイル I/O。
   - `UpdateChecker.swift` — GitHub releases からバージョンチェック、DMG ダウンロード、自動更新。
-- `menubarcc_hook.py` — Claude Code のフックブリッジ。`~/.claude/sessions/<sid>.waiting` フラグの維持と効果音再生。
+- `menubarcc_hook.py` — Claude Code のフックブリッジ。`~/.claude/sessions/<sid>.waiting` フラグの維持、効果音再生（`muteAll`）、バナー通知イベントのスプール書き出し（`bannersEnabled`、`events/` ディレクトリ経由でアプリが消費して UNUserNotificationCenter で表示）。アプリ起動時にインストール済みスクリプトを自動更新。
 - `build.sh` — ビルド・署名スクリプト。
 
 セッション状態は `status`（busy/idle）と `.waiting` フラグ、経過時間から導出する：**waiting**＝idle かつ `.waiting` あり、**stuck**＝busy かつ閾値超え（`stuckSecs`、既定600s、検出は `stuckEnabled` でON/OFF）、**idle**＝idle かつ `.waiting` なし。
