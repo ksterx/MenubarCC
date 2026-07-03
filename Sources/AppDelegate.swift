@@ -155,26 +155,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    // The banner headline is the session's project directory — the OS
+    // already labels the banner with the app name, so repeating
+    // "Claude Code" there would just be noise.
     private func showBanner(for event: [String: Any]) {
         let kind = event["event"] as? String ?? ""
         let cwd = event["cwd"] as? String ?? ""
-        let dir = cwd.isEmpty ? "" : URL(fileURLWithPath: cwd).lastPathComponent
+        let dir = cwd.isEmpty ? "Claude Code" : URL(fileURLWithPath: cwd).lastPathComponent
         let message = event["message"] as? String ?? ""
 
-        let title: String
         let body: String
         switch kind {
         case "Stop":
-            title = "Claude Code \u{2014} Finished"
-            body = message.isEmpty ? "Waiting for your input" : message
+            body = message.isEmpty ? "Finished \u{2014} waiting for your input" : message
         case "PermissionRequest":
-            title = "Claude Code \u{2014} Permission request"
             body = message.isEmpty ? "Waiting for your approval" : message
         default:
-            title = "Claude Code"
             body = message.isEmpty ? "Notification" : message
         }
-        sendNotification(title: title, subtitle: dir, body: body)
+        sendNotification(title: dir, subtitle: "", body: body)
     }
 
     // MARK: - Resource path
@@ -225,9 +224,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for s in stuck where !knownStuck.contains(s.sessionId) {
             if bannersOn {
                 sendNotification(
-                    title: "Claude Code \u{2014} Stuck session",
-                    subtitle: s.dirName,
-                    body: "busy for \(formatAge(s.ageSeconds)) with no updates"
+                    title: s.dirName,
+                    subtitle: "",
+                    body: "Stuck \u{2014} busy for \(formatAge(s.ageSeconds)) with no updates"
                 )
             }
         }
@@ -242,6 +241,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         content.title = title
         content.subtitle = subtitle
         content.body = body
+        // Group notifications per project in Notification Center
+        content.threadIdentifier = title
         let req = UNNotificationRequest(
             identifier: UUID().uuidString, content: content, trigger: nil
         )
