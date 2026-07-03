@@ -45,6 +45,10 @@ CONFIG_PATH = (
 SESSIONS_DIR = Path.home() / ".claude" / "sessions"
 EVENTS_DIR = CONFIG_PATH.parent / "events"
 
+# Hidden helper sessions (e.g. claude-mem's background "observer" sessions
+# run under ~/.claude-mem) are not the user's work — never sound or banner.
+BACKGROUND_CWD_ROOT = Path.home() / ".claude-mem"
+
 # Default sounds shipped with macOS — no bundled assets required.
 DEFAULT_SOUNDS: dict[str, str] = {
     "Stop":              "/System/Library/Sounds/Glass.aiff",
@@ -141,6 +145,10 @@ def main() -> None:
 
         # Only user-visible events go through the sound/banner pipeline.
         if event not in SOUND_EVENTS:
+            sys.exit(0)
+
+        cwd = payload.get("cwd") or ""
+        if cwd and Path(cwd).is_relative_to(BACKGROUND_CWD_ROOT):
             sys.exit(0)
 
         cfg = _load_config()
