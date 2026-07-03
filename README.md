@@ -69,6 +69,8 @@ brew tap ksterx/tap
 brew install --cask menubarcc
 ```
 
+> Recent Homebrew versions ask you to trust third-party taps first — if prompted, run `brew trust ksterx/tap` and install again.
+
 ### Manual
 
 1. Download the latest **`MenubarCC-x.y.z.dmg`** from the [**Releases**](https://github.com/ksterx/MenubarCC/releases/latest) page.
