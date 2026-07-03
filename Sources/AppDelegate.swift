@@ -35,6 +35,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var knownStuck: Set<String> = []
     private var eventsWatcher: DispatchSourceFileSystemObject?
 
+    // Cached OS notification permission — menu building is synchronous,
+    // so the async settings query updates these and re-renders on change.
+    private var notifStatus: UNAuthorizationStatus = .notDetermined
+    private var notifAuthorized = false
+
     // MARK: - Lifecycle
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -63,8 +68,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             [weak self] _ in self?.refresh()
         }
 
-        UNUserNotificationCenter.current()
-            .requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        refreshNotifStatus()
         syncInstalledHookScript()
         startEventsWatcher()
 
@@ -73,6 +77,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + firstRunPromptDelay) {
             [weak self] in self?.firstRunCheck()
         }
+    }
+
+    // MARK: - Notification permission
+
+    private func refreshNotifStatus() {
+        UNUserNotificationCenter.current().getNotificationSettings { [weak self] s in
+            let authorized = s.authorizationStatus == .authorized
+                && s.alertSetting == .enabled
+            DispatchQueue.main.async {
+                guard let self = self else { return }
+                if authorized != self.notifAuthorized
+                    || s.authorizationStatus != self.notifStatus {
+                    self.notifStatus = s.authorizationStatus
+                    self.notifAuthorized = authorized
+                    self.refresh()
+                }
+            }
+        }
+    }
+
+    /// Route the user to whatever unblocks banners: the system prompt when
+    /// it can still be shown, System Settings once it can't.
+    private func ensureNotificationPermission() {
+        if notifStatus == .notDetermined {
+            UNUserNotificationCenter.current()
+                .requestAuthorization(options: [.alert, .sound]) { [weak self] _, _ in
+                    DispatchQueue.main.async { self?.refreshNotifStatus() }
+                }
+        } else {
+            let bid = Bundle.main.bundleIdentifier ?? "com.ksterx.clawd"
+            if let url = URL(string:
+                "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=\(bid)") {
+                NSWorkspace.shared.open(url)
+            }
+        }
+    }
+
+    @objc private func fixNotifPermission(_ sender: NSMenuItem) {
+        ensureNotificationPermission()
     }
 
     // MARK: - Banner events (spooled by menubarcc_hook.py)
@@ -244,14 +287,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         menu.addItem(soundsItem)
 
+        // The switch shows the EFFECTIVE state: app setting AND OS permission.
         let bannersItem = NSMenuItem()
         bannersItem.view = makeSwitchView(
             title: "Banners",
-            isOn: banners,
+            isOn: banners && notifAuthorized,
             target: self,
             action: #selector(bannersToggled(_:))
         )
         menu.addItem(bannersItem)
+
+        // Only surface the permission problem when it actually blocks banners.
+        if banners && !notifAuthorized {
+            let warn = NSMenuItem(
+                title: "",
+                action: #selector(fixNotifPermission(_:)),
+                keyEquivalent: ""
+            )
+            warn.attributedTitle = NSAttributedString(
+                string: "\u{26A0} Enable notifications in System Settings\u{2026}",
+                attributes: [
+                    .font: NSFont.systemFont(ofSize: 11),
+                    .foregroundColor: NSColor.systemOrange,
+                ]
+            )
+            warn.target = self
+            menu.addItem(warn)
+        }
 
         // Advanced Settings
         menu.addItem(buildAdvancedMenu())
@@ -279,6 +341,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // switch gray even when ON. Activate for the menu's lifetime only.
     func menuWillOpen(_ menu: NSMenu) {
         NSApp.activate(ignoringOtherApps: true)
+        refreshNotifStatus()   // pick up permission changes made in Settings
     }
 
     func menuDidClose(_ menu: NSMenu) {
@@ -338,7 +401,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func bannersToggled(_ sender: NSSwitch) {
-        updateHookConfig(["bannersEnabled": sender.state == .on])
+        let wantOn = sender.state == .on
+        updateHookConfig(["bannersEnabled": wantOn])
+        // Flipping ON records the intent; if the OS side is missing,
+        // immediately walk the user through granting it.
+        if wantOn && !notifAuthorized {
+            ensureNotificationPermission()
+        }
         refresh()
     }
 
@@ -641,6 +710,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let (_, msg) = installHooks()
             showAlert(title: "MenubarCC", message: msg)
             refresh()
+        }
+
+        // Ask for notification permission while the user is still engaged
+        // with the onboarding dialogs — a cold-launch prompt gets missed.
+        if notifStatus == .notDetermined {
+            ensureNotificationPermission()
         }
     }
 
