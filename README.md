@@ -130,34 +130,22 @@ Choose **Check for Updates…** from the menu. If a newer release exists, Menuba
 
 ## Build from source
 
-The app is built with [py2app](https://py2app.readthedocs.io/) for Apple Silicon.
+The app is a native Swift / AppKit binary for Apple Silicon. All you need is the Xcode Command Line Tools — no Python, no dependencies.
 
 ```bash
-# A dedicated conda-forge env (Python 3.13 + py2app/rumps/pyobjc/pillow/certifi)
-conda create -n menubarcc-build -c conda-forge python=3.13 py2app rumps pyobjc pillow certifi
-conda activate menubarcc-build
-
-# Build the .app
-rm -rf build dist
-python setup.py py2app
-# → dist/MenubarCC.app
+./build.sh 2.0.0
+# → dist/MenubarCC.app (compiled, bundled, Developer ID signed)
 ```
 
-Run from source without bundling:
-
-```bash
-python menubarcc.py
-```
-
-Producing a distributable, signed, notarized DMG involves a few macOS-specific steps (bundling `libexpat`, `install_name_tool` rpath fixes, inside-out codesigning, and notarization). The full, battle-tested release procedure lives in [`CLAUDE.md`](CLAUDE.md).
+Producing a distributable, notarized DMG involves a few extra macOS-specific steps (notarization, DMG staging). The full, battle-tested release procedure lives in [`CLAUDE.md`](CLAUDE.md).
 
 ### Project layout
 
 | File | Role |
 | --- | --- |
-| [`menubarcc.py`](menubarcc.py) | The menu bar app (rumps): state detection, Clawd's animation, menu, settings, updates. |
+| [`Sources/`](Sources/) | The menu bar app (Swift / AppKit): state detection, Clawd's animation, menu, settings, updates. |
 | [`menubarcc_hook.py`](menubarcc_hook.py) | The Claude Code hook bridge: maintains the `.waiting` flag and plays sounds. |
-| [`setup.py`](setup.py) | py2app build configuration (version, bundled dylibs). |
+| [`build.sh`](build.sh) | Build + codesign script. |
 
 ## Privacy
 

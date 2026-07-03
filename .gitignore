@@ -6,3 +6,5 @@ __pycache__/
 .DS_Store
 *.dmg
 rw.*.dmg
+MenubarCC-swift
+native_launcher
