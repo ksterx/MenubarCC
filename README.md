@@ -62,10 +62,19 @@ Clawd animates to match what your sessions are doing. When sessions are in diffe
 
 ## Install
 
+### Homebrew (recommended)
+
+```bash
+brew tap ksterx/tap
+brew install --cask menubarcc
+```
+
+### Manual
+
 1. Download the latest **`MenubarCC-x.y.z.dmg`** from the [**Releases**](https://github.com/ksterx/MenubarCC/releases/latest) page.
 2. Open the DMG and drag **MenubarCC** into **Applications**.
-3. Launch it from Applications. Clawd appears in your menu bar.
-4. On first run, MenubarCC offers to install a small hook into Claude Code (see [How it works](#how-it-works)). Click **Install Hook** — you can also do this later from **Advanced Settings**.
+
+Either way, launch **MenubarCC** from Applications and Clawd appears in your menu bar. On first run, MenubarCC offers to install a small hook into Claude Code (see [How it works](#how-it-works)). Click **Install Hook** — you can also do this later from **Advanced Settings**.
 
 > The app is signed with a Developer ID and notarized by Apple, so it launches without the *"could not verify it is free of malware"* prompt.
 
