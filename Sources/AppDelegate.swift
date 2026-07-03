@@ -21,7 +21,7 @@ let stuckPresets: [(label: String, secs: Int)] = [
 
 // MARK: - AppDelegate
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem!
     private var frames: AnimationFrames!
     private var animTimer: Timer?
@@ -146,6 +146,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         waiting: [SessionInfo], idle: [SessionInfo]
     ) {
         let menu = NSMenu()
+        // Auto-enable would mark the action-less switch item as disabled and
+        // render its custom view (incl. the NSSwitch) dimmed gray.
+        menu.autoenablesItems = false
+        menu.delegate = self
 
         if sessions.isEmpty {
             let item = NSMenuItem(title: "No sessions", action: nil, keyEquivalent: "")
@@ -191,6 +195,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quitItem)
 
         statusItem.menu = menu
+    }
+
+    // NSSwitch draws its accent tint only while the app is active; an
+    // accessory app's status menu opens without activation, leaving the
+    // switch gray even when ON. Activate for the menu's lifetime only.
+    func menuWillOpen(_ menu: NSMenu) {
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        NSApp.deactivate()
     }
 
     private func addSection(_ menu: NSMenu, label: String, sessions: [SessionInfo]) {
