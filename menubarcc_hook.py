@@ -21,6 +21,7 @@ Config: ~/Library/Application Support/com.ksterx.MenubarCC/hook-config.json
     {
       "muteAll": false,
       "bannersEnabled": true,
+      "responsePreviewEnabled": true,
       "perEventEnabled": {"Stop": true, "Notification": true, "PermissionRequest": true},
       "soundPaths":      {"Stop": null,  "Notification": null,  "PermissionRequest": null}
     }
@@ -29,6 +30,8 @@ Exits 0 in all cases so it never blocks Claude Code's work.
 """
 
 import json
+import os
+import re
 import subprocess
 import sys
 import time
@@ -77,6 +80,20 @@ def _load_config() -> dict:
         return {}
 
 
+def _has_running_background_task(payload: dict) -> bool:
+    """True if the turn ended only to wait on a background agent.
+
+    Claude Code reports live background work in the Stop payload's
+    ``background_tasks``. A running entry means the main agent will resume on
+    its own — it is NOT waiting for the user — so it must not raise the
+    "input waiting" flag (which would make Clawd bounce for no reason).
+    """
+    tasks = payload.get("background_tasks")
+    if not isinstance(tasks, list):
+        return False
+    return any(isinstance(t, dict) and t.get("status") == "running" for t in tasks)
+
+
 def _update_waiting_flag(event: str, payload: dict) -> None:
     """Touch / remove ~/.claude/sessions/<sid>.waiting based on the event."""
     sid = payload.get("session_id") or payload.get("sessionId")
@@ -85,12 +102,115 @@ def _update_waiting_flag(event: str, payload: dict) -> None:
     flag = SESSIONS_DIR / f"{sid}.waiting"
     try:
         if event == "Stop":
-            SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
-            flag.touch(exist_ok=True)
+            if _has_running_background_task(payload):
+                # Finished our part but a background agent is still working.
+                flag.unlink(missing_ok=True)
+            else:
+                SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+                flag.touch(exist_ok=True)
         elif event in ("UserPromptSubmit", "SessionEnd"):
             flag.unlink(missing_ok=True)
     except Exception:
         pass
+
+
+# Response-preview tunables. A banner body is only a few lines, so a short
+# prefix is all that's useful; reading the whole transcript to fill it is not
+# worth the hook's 5s budget.
+PREVIEW_MAX_CHARS = 140
+TRANSCRIPT_TAIL_CAP = 2_000_000  # bytes read from the transcript's tail, max
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_WS_RE = re.compile(r"\s+")
+
+
+def _clean_preview(text: str) -> str | None:
+    """Flatten a raw assistant message into a single short banner line."""
+    text = _WS_RE.sub(" ", _ANSI_RE.sub("", text)).strip()
+    if not text:
+        return None
+    if len(text) > PREVIEW_MAX_CHARS:
+        text = text[: PREVIEW_MAX_CHARS - 1].rstrip() + "…"
+    return text
+
+
+def _text_from_content(content) -> str | None:
+    """Join the user-visible text blocks of an assistant message."""
+    if isinstance(content, str):
+        return content.strip() or None
+    if not isinstance(content, list):
+        return None
+    parts = [
+        b["text"]
+        for b in content
+        if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+    ]
+    joined = "".join(parts).strip()
+    return joined or None
+
+
+def _extract_from_transcript(path: str) -> str | None:
+    """Find the last main-session assistant text in a JSONL transcript.
+
+    Reads only the file's tail (up to TRANSCRIPT_TAIL_CAP), walks entries
+    newest-first, skips subagent (sidechain) turns and text-less turns
+    (e.g. a trailing tool call), and returns the first real text found.
+    """
+    try:
+        p = Path(path).expanduser()
+        if not p.is_file():
+            return None
+        size = p.stat().st_size
+        if size == 0:
+            return None
+        to_read = min(size, TRANSCRIPT_TAIL_CAP)
+        with open(p, "rb") as f:
+            f.seek(size - to_read)
+            data = f.read(to_read)
+        # If we began mid-file, the first line is likely partial — drop it.
+        if to_read < size:
+            nl = data.find(b"\n")
+            data = data[nl + 1:] if nl != -1 else b""
+        for raw in reversed(data.split(b"\n")):
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                entry = json.loads(raw.decode("utf-8"))
+            except Exception:
+                continue  # partial or non-JSON line — skip
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("isSidechain") is True:
+                continue
+            if entry.get("type") != "assistant":
+                continue
+            msg = entry.get("message")
+            if not isinstance(msg, dict):
+                continue
+            text = _text_from_content(msg.get("content"))
+            if text:
+                return text
+    except Exception:
+        return None
+    return None
+
+
+def _response_preview(payload: dict) -> str | None:
+    """Best-effort preview of the model's last response for a Stop banner.
+
+    Prefers the payload's own fields (no I/O), falling back to reading the
+    transcript tail. Returns None so the caller keeps the fixed banner text.
+    """
+    for src in (payload.get("last_assistant_message"), payload.get("message")):
+        if isinstance(src, str) and src.strip():
+            return _clean_preview(src)
+    tp = payload.get("transcript_path")
+    if isinstance(tp, str) and tp:
+        text = _extract_from_transcript(tp)
+        if text:
+            return _clean_preview(text)
+    return None
 
 
 def _spool_banner_event(event: str, payload: dict, cfg: dict) -> None:
@@ -99,16 +219,24 @@ def _spool_banner_event(event: str, payload: dict, cfg: dict) -> None:
         return
     try:
         EVENTS_DIR.mkdir(parents=True, exist_ok=True)
+        message = payload.get("message") or ""
+        # For a finished response, optionally surface the reply's opening.
+        if event == "Stop" and bool(cfg.get("responsePreviewEnabled", True)):
+            preview = _response_preview(payload)
+            if preview:
+                message = preview
         data = {
             "event": event,
             "sessionId": payload.get("session_id") or payload.get("sessionId") or "",
             "cwd": payload.get("cwd") or "",
-            "message": payload.get("message") or "",
+            "message": message,
             "ts": time.time(),
         }
         name = f"{time.time_ns()}-{event}"
         tmp = EVENTS_DIR / f"{name}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        # 0600 — the body may quote the model's reply; keep it user-private.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f)
         tmp.replace(EVENTS_DIR / f"{name}.json")  # atomic — never seen half-written
     except Exception:
@@ -149,6 +277,12 @@ def main() -> None:
 
         cwd = payload.get("cwd") or ""
         if cwd and Path(cwd).is_relative_to(BACKGROUND_CWD_ROOT):
+            sys.exit(0)
+
+        # A Stop that only ended to wait on a background agent isn't a
+        # user-facing "done" moment — suppress its sound and banner, matching
+        # the .waiting flag handled above.
+        if event == "Stop" and _has_running_background_task(payload):
             sys.exit(0)
 
         cfg = _load_config()

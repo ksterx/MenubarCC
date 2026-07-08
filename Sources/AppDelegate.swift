@@ -278,6 +278,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let cfg = loadHookConfig()
         let muted = cfg["muteAll"] as? Bool ?? false
         let banners = cfg["bannersEnabled"] as? Bool ?? true
+        let responsePreview = cfg["responsePreviewEnabled"] as? Bool ?? true
 
         let soundsItem = NSMenuItem()
         soundsItem.view = makeSwitchView(
@@ -297,6 +298,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             action: #selector(bannersToggled(_:))
         )
         menu.addItem(bannersItem)
+
+        // Preview the reply's opening in the Stop banner body. Only meaningful
+        // while banners are on, but kept as an independent switch like the rest.
+        let previewItem = NSMenuItem()
+        previewItem.view = makeSwitchView(
+            title: "Response Preview",
+            isOn: responsePreview,
+            target: self,
+            action: #selector(responsePreviewToggled(_:))
+        )
+        menu.addItem(previewItem)
 
         // Only surface the permission problem when it actually blocks banners.
         if banners && !notifAuthorized {
@@ -398,6 +410,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func soundsToggled(_ sender: NSSwitch) {
         updateHookConfig(["muteAll": sender.state != .on])
+        refresh()
+    }
+
+    @objc private func responsePreviewToggled(_ sender: NSSwitch) {
+        updateHookConfig(["responsePreviewEnabled": sender.state == .on])
         refresh()
     }
 
