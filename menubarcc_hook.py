@@ -22,6 +22,7 @@ Config: ~/Library/Application Support/com.ksterx.MenubarCC/hook-config.json
       "muteAll": false,
       "bannersEnabled": true,
       "responsePreviewEnabled": true,
+      "volume": 1.0,
       "perEventEnabled": {"Stop": true, "Notification": true, "PermissionRequest": true},
       "soundPaths":      {"Stop": null,  "Notification": null,  "PermissionRequest": null}
     }
@@ -58,6 +59,8 @@ DEFAULT_SOUNDS: dict[str, str] = {
     "Notification":      "/System/Library/Sounds/Tink.aiff",
     "PermissionRequest": "/System/Library/Sounds/Funk.aiff",
 }
+
+DEFAULT_VOLUME = 1.0
 
 # Events that may play a sound (user-controllable in the menu)
 SOUND_EVENTS = set(DEFAULT_SOUNDS.keys())
@@ -255,6 +258,13 @@ def _resolve_sound_path(event: str, cfg: dict) -> str | None:
     return None
 
 
+def _resolve_volume(cfg: dict) -> float:
+    volume = cfg.get("volume", DEFAULT_VOLUME)
+    if not isinstance(volume, (int, float)):
+        return DEFAULT_VOLUME
+    return max(0.0, min(1.0, float(volume)))
+
+
 def main() -> None:
     try:
         raw = sys.stdin.read().strip()
@@ -302,8 +312,9 @@ def main() -> None:
         if not sound_path:
             sys.exit(0)
 
+        volume = _resolve_volume(cfg)
         subprocess.Popen(
-            ["afplay", sound_path],
+            ["afplay", "-v", str(volume), sound_path],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True,

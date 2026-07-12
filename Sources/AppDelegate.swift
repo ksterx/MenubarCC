@@ -408,6 +408,36 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return view
     }
 
+    // MARK: - Slider view (volume)
+
+    private func makeSliderView(
+        title: String, value: Double, enabled: Bool,
+        target: AnyObject, action: Selector
+    ) -> NSView {
+        let width: CGFloat = 260, height: CGFloat = 40
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+
+        let titleField = NSTextField(labelWithString: title)
+        titleField.frame = NSRect(x: 14, y: 20, width: 180, height: 16)
+        titleField.font = NSFont.menuFont(ofSize: 13)
+        titleField.textColor = enabled ? .labelColor : .disabledControlTextColor
+        view.addSubview(titleField)
+
+        let slider = NSSlider(frame: NSRect(x: 14, y: 2, width: width - 28, height: 20))
+        slider.minValue = 0
+        slider.maxValue = 1
+        slider.doubleValue = value
+        slider.isEnabled = enabled
+        slider.target = target
+        slider.action = action
+        // Coalesce to one config write on mouse-up rather than one per drag tick —
+        // there's no live audio preview, so continuous updates buy nothing.
+        slider.isContinuous = false
+        view.addSubview(slider)
+
+        return view
+    }
+
     @objc private func soundsToggled(_ sender: NSSwitch) {
         updateHookConfig(["muteAll": sender.state != .on])
         refresh()
@@ -467,6 +497,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         sub.addItem(.separator())
 
+        let volume = cfg["volume"] as? Double ?? 1.0
+        let volumeItem = NSMenuItem()
+        volumeItem.view = makeSliderView(
+            title: "Volume",
+            value: volume,
+            enabled: !muted,
+            target: self,
+            action: #selector(volumeChanged(_:))
+        )
+        sub.addItem(volumeItem)
+        sub.addItem(.separator())
+
         for (event, _) in controlledHookEvents {
             let custom = soundPaths[event] as? String
             let suffix = custom != nil ? "  (\(URL(fileURLWithPath: custom!).lastPathComponent))" : "  (Default)"
@@ -491,6 +533,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         root.submenu = sub
         return root
+    }
+
+    @objc private func volumeChanged(_ sender: NSSlider) {
+        updateHookConfig(["volume": sender.doubleValue])
     }
 
     @objc private func toggleEvent(_ sender: NSMenuItem) {
