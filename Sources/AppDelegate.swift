@@ -56,6 +56,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.button?.image = frames.staticFrame
         statusItem.button?.imagePosition = .imageOnly
 
+        // The menu is populated lazily in menuNeedsUpdate(_:) so its session
+        // list is always current when opened, not up to refreshSecs stale.
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        menu.delegate = self
+        statusItem.menu = menu
+
         let settings = loadAppSettings()
         animFps = settings["animFps"] as? Double ?? defaultAnimFps
         stuckEnabled = settings["stuckEnabled"] as? Bool ?? true
@@ -65,14 +72,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             [weak self] _ in self?.animate()
         }
         refreshTimer = Timer.scheduledTimer(withTimeInterval: refreshSecs, repeats: true) {
-            [weak self] _ in self?.refresh()
+            [weak self] _ in self?.refreshState()
         }
 
         refreshNotifStatus()
         syncInstalledHookScript()
         startEventsWatcher()
 
-        refresh()
+        refreshState()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + firstRunPromptDelay) {
             [weak self] in self?.firstRunCheck()
@@ -91,7 +98,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     || s.authorizationStatus != self.notifStatus {
                     self.notifStatus = s.authorizationStatus
                     self.notifAuthorized = authorized
-                    self.refresh()
+                    self.refreshState()
                 }
             }
         }
@@ -153,6 +160,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             showBanner(for: d)
         }
+        // A hook just wrote the .waiting flag before spooling this banner —
+        // react now so Clawd starts bouncing instead of waiting for the poll.
+        refreshState()
     }
 
     // The banner headline is the session's project directory — the OS
@@ -203,7 +213,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Refresh
 
-    private func refresh() {
+    /// Update everything that must stay live even while the menu is closed:
+    /// the crab animation, the menu-bar tooltip, and stuck notifications.
+    /// The menu itself is (re)built lazily in menuNeedsUpdate(_:).
+    private func refreshState() {
         let ss = loadSessions(stuckSecs: stuckSecs, stuckEnabled: stuckEnabled)
         let stuck   = ss.filter { $0.isStuck }
         let busy    = ss.filter { $0.status == "busy" && !$0.isStuck }
@@ -219,6 +232,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             statusItem.button?.image = frames.staticFrame
         }
 
+        updateTooltip(stuck: stuck, busy: busy, waiting: waiting, idle: idle)
+
         // Stuck notifications (gated by the Banners toggle)
         let bannersOn = loadHookConfig()["bannersEnabled"] as? Bool ?? true
         for s in stuck where !knownStuck.contains(s.sessionId) {
@@ -231,8 +246,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
         }
         knownStuck = Set(stuck.map(\.sessionId))
+    }
 
-        rebuildMenu(sessions: ss, stuck: stuck, busy: busy, waiting: waiting, idle: idle)
+    // Glance-able summary on hover, most-actionable category first.
+    private func updateTooltip(
+        stuck: [SessionInfo], busy: [SessionInfo],
+        waiting: [SessionInfo], idle: [SessionInfo]
+    ) {
+        var parts: [String] = []
+        if !waiting.isEmpty { parts.append("\(waiting.count) waiting") }
+        if !stuck.isEmpty   { parts.append("\(stuck.count) stuck") }
+        if !busy.isEmpty    { parts.append("\(busy.count) active") }
+        if !idle.isEmpty    { parts.append("\(idle.count) idle") }
+        statusItem.button?.toolTip =
+            parts.isEmpty ? "MenubarCC \u{2014} no sessions" : parts.joined(separator: " \u{00B7} ")
     }
 
     private func sendNotification(title: String, subtitle: String, body: String) {
@@ -251,16 +278,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: - Menu
 
-    private func rebuildMenu(
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        let ss = loadSessions(stuckSecs: stuckSecs, stuckEnabled: stuckEnabled)
+        let stuck   = ss.filter { $0.isStuck }
+        let busy    = ss.filter { $0.status == "busy" && !$0.isStuck }
+        let waiting = ss.filter { $0.isWaiting }
+        let idle    = ss.filter { $0.status == "idle" && !$0.isWaiting }
+        populateMenu(menu, sessions: ss, stuck: stuck, busy: busy, waiting: waiting, idle: idle)
+    }
+
+    // autoenablesItems is false on this menu (set once at creation) so the
+    // custom switch rows keep their accent tint instead of rendering dimmed.
+    private func populateMenu(
+        _ menu: NSMenu,
         sessions: [SessionInfo],
         stuck: [SessionInfo], busy: [SessionInfo],
         waiting: [SessionInfo], idle: [SessionInfo]
     ) {
-        let menu = NSMenu()
-        // Auto-enable would mark the action-less switch item as disabled and
-        // render its custom view (incl. the NSSwitch) dimmed gray.
-        menu.autoenablesItems = false
-        menu.delegate = self
+        menu.removeAllItems()
 
         if sessions.isEmpty {
             let item = NSMenuItem(title: "No sessions", action: nil, keyEquivalent: "")
@@ -345,8 +380,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         )
         quitItem.target = self
         menu.addItem(quitItem)
-
-        statusItem.menu = menu
     }
 
     // NSSwitch draws its accent tint only while the app is active; an
@@ -377,11 +410,44 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         for s in sessions {
             let title = "        \(s.dirName)   \(formatAge(s.ageSeconds))"
-            let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
-            item.isEnabled = false
+            let item = NSMenuItem(
+                title: title,
+                action: #selector(openSession(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = s.cwd as NSString
+            item.toolTip = s.cwd   // full path disambiguates same-named dirs
             menu.addItem(item)
         }
         menu.addItem(.separator())
+    }
+
+    // Clicking a session jumps to its project per the "On Session Click"
+    // setting: switch to its Orca terminal, reveal in Finder, or copy the path.
+    @objc private func openSession(_ sender: NSMenuItem) {
+        guard let cwd = sender.representedObject as? String, !cwd.isEmpty else { return }
+        let action = loadAppSettings()["sessionClickAction"] as? String
+            ?? (orcaAvailable() ? "orca" : "finder")
+
+        switch action {
+        case "copy":
+            let pb = NSPasteboard.general
+            pb.clearContents()
+            pb.setString(cwd, forType: .string)
+        case "orca":
+            // Runs `orca` subprocesses — do the work off the main thread and
+            // fall back to Finder if no matching terminal is found.
+            DispatchQueue.global(qos: .userInitiated).async {
+                if !orcaSwitchToTerminal(forCwd: cwd) {
+                    DispatchQueue.main.async {
+                        NSWorkspace.shared.open(URL(fileURLWithPath: cwd))
+                    }
+                }
+            }
+        default: // "finder"
+            NSWorkspace.shared.open(URL(fileURLWithPath: cwd))
+        }
     }
 
     // MARK: - Switch view (Tailscale-style toggle)
@@ -440,12 +506,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func soundsToggled(_ sender: NSSwitch) {
         updateHookConfig(["muteAll": sender.state != .on])
-        refresh()
+        refreshState()
     }
 
     @objc private func responsePreviewToggled(_ sender: NSSwitch) {
         updateHookConfig(["responsePreviewEnabled": sender.state == .on])
-        refresh()
+        refreshState()
     }
 
     @objc private func bannersToggled(_ sender: NSSwitch) {
@@ -456,7 +522,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if wantOn && !notifAuthorized {
             ensureNotificationPermission()
         }
-        refresh()
+        refreshState()
     }
 
     // MARK: - Advanced Settings
@@ -468,6 +534,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         sub.addItem(buildSoundMenu())
         sub.addItem(buildSpeedMenu())
         sub.addItem(buildStuckMenu())
+        sub.addItem(buildSessionClickMenu())
         sub.addItem(.separator())
         sub.addItem(buildLoginItemEntry())
         sub.addItem(.separator())
@@ -547,7 +614,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         perEvent[event] = !current
         cfg["perEventEnabled"] = perEvent
         saveHookConfig(cfg)
-        refresh()
+        refreshState()
     }
 
     @objc private func chooseSound(_ sender: NSMenuItem) {
@@ -559,7 +626,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             sp[event] = stored
             cfg["soundPaths"] = sp
             saveHookConfig(cfg)
-            refresh()
+            refreshState()
         }
     }
 
@@ -568,7 +635,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         cfg["soundPaths"] = [String: Any]()
         saveHookConfig(cfg)
         try? FileManager.default.removeItem(at: appSoundsDir)
-        refresh()
+        refreshState()
     }
 
     private func promptSoundFile() -> String? {
@@ -613,7 +680,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var settings = loadAppSettings()
         settings["animFps"] = animFps
         saveAppSettings(settings)
-        refresh()
+        refreshState()
     }
 
     // MARK: - Stuck Detection submenu
@@ -650,7 +717,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var settings = loadAppSettings()
         settings["stuckEnabled"] = stuckEnabled
         saveAppSettings(settings)
-        refresh()
+        refreshState()
     }
 
     @objc private func setStuckSecs(_ sender: NSMenuItem) {
@@ -659,7 +726,47 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var settings = loadAppSettings()
         settings["stuckSecs"] = stuckSecs
         saveAppSettings(settings)
-        refresh()
+        refreshState()
+    }
+
+    // MARK: - Session Click Action
+
+    private func buildSessionClickMenu() -> NSMenuItem {
+        let root = NSMenuItem(title: "On Session Click", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+        let orcaOK = orcaAvailable()
+        let current = loadAppSettings()["sessionClickAction"] as? String
+            ?? (orcaOK ? "orca" : "finder")
+
+        let options: [(id: String, label: String)] = [
+            ("orca", orcaOK ? "Switch to Orca Terminal"
+                            : "Switch to Orca Terminal  (not found)"),
+            ("finder", "Reveal in Finder"),
+            ("copy", "Copy Path"),
+        ]
+        for opt in options {
+            let item = NSMenuItem(
+                title: opt.label,
+                action: #selector(setSessionClickAction(_:)),
+                keyEquivalent: ""
+            )
+            item.representedObject = opt.id as NSString
+            item.target = self
+            item.state = current == opt.id ? .on : .off
+            // Can't switch to an Orca terminal without Orca — disable that row.
+            if opt.id == "orca" && !orcaOK { item.action = nil }
+            sub.addItem(item)
+        }
+
+        root.submenu = sub
+        return root
+    }
+
+    @objc private func setSessionClickAction(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        var settings = loadAppSettings()
+        settings["sessionClickAction"] = id
+        saveAppSettings(settings)
     }
 
     // MARK: - Login Item
@@ -702,7 +809,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } catch {
                 showAlert(title: "MenubarCC", message: "Login item: \(error.localizedDescription)")
             }
-            refresh()
+            refreshState()
         }
     }
 
@@ -742,13 +849,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func installHookAction(_ sender: NSMenuItem) {
         let (ok, msg) = installHooks()
         showAlert(title: "MenubarCC", message: msg)
-        if ok { refresh() }
+        if ok { refreshState() }
     }
 
     @objc private func uninstallHookAction(_ sender: NSMenuItem) {
         let (ok, msg) = uninstallHooks()
         showAlert(title: "MenubarCC", message: msg)
-        if ok { refresh() }
+        if ok { refreshState() }
     }
 
     // MARK: - First-run prompt
@@ -773,7 +880,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if alert.runModal() == .alertFirstButtonReturn {
             let (_, msg) = installHooks()
             showAlert(title: "MenubarCC", message: msg)
-            refresh()
+            refreshState()
         }
 
         // Ask for notification permission while the user is still engaged

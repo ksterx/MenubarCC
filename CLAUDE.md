@@ -4,13 +4,14 @@ macOS メニューバーアプリ **MenubarCC**（Swift / AppKit, arm64, Develop
 
 ## Source
 
-- `Sources/*.swift` — メニューバーアプリ本体（Swift / AppKit）。6 ファイル構成：
+- `Sources/*.swift` — メニューバーアプリ本体（Swift / AppKit）。7 ファイル構成：
   - `main.swift` — エントリポイント。NSApplication を accessory として起動。
-  - `AppDelegate.swift` — NSStatusItem・メニュー・アニメーション・更新確認・設定 UI。
-  - `SessionMonitor.swift` — `~/.claude/sessions/*.json` からセッション状態を読み込み。
+  - `AppDelegate.swift` — NSStatusItem・メニュー・アニメーション・更新確認・設定 UI。メニューは `menuNeedsUpdate` で開くたびに再構築し、`refreshState()`（タイマー／バナーイベント駆動）はアニメ・ツールチップ・stuck 通知のみ更新する。セッション行クリックは `sessionClickAction` 設定（orca/finder/copy）で分岐。
+  - `SessionMonitor.swift` — `~/.claude/sessions/*.json` からセッション状態を読み込み。`pid` の生存確認でゾンビセッションを除外し、孤児 `.waiting` フラグを掃除する。
   - `FrameGenerator.swift` — カニ PNG から walk/bounce/pulse/static アニメーションフレームを CoreGraphics で生成。
   - `HookManager.swift` — Claude Code フックの install/uninstall、JSON 設定ファイル I/O。
   - `UpdateChecker.swift` — GitHub releases からバージョンチェック、DMG ダウンロード、自動更新。
+  - `OrcaBridge.swift` — Orca IDE 連携（任意）。`orca terminal list --json` の `worktreePath` をセッションの `cwd` に対応付け、`orca terminal switch` で該当端末を前面化。orca CLI が無い環境では無効。
 - `menubarcc_hook.py` — Claude Code のフックブリッジ。`~/.claude/sessions/<sid>.waiting` フラグの維持、効果音再生（`muteAll`）、バナー通知イベントのスプール書き出し（`bannersEnabled`、`events/` ディレクトリ経由でアプリが消費して UNUserNotificationCenter で表示）。アプリ起動時にインストール済みスクリプトを自動更新。
 - `build.sh` — ビルド・署名スクリプト。
 
