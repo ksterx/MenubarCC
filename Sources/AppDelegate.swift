@@ -21,7 +21,7 @@ let stuckPresets: [(label: String, secs: Int)] = [
 
 // MARK: - AppDelegate
 
-class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     private var statusItem: NSStatusItem!
     private var frames: AnimationFrames!
     private var animTimer: Timer?
@@ -75,6 +75,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             [weak self] _ in self?.refreshState()
         }
 
+        UNUserNotificationCenter.current().delegate = self
         refreshNotifStatus()
         syncInstalledHookScript()
         startEventsWatcher()
@@ -183,7 +184,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         default:
             body = message.isEmpty ? "Notification" : message
         }
-        sendNotification(title: dir, subtitle: "", body: body)
+        sendNotification(title: dir, subtitle: "", body: body, cwd: cwd)
     }
 
     // MARK: - Resource path
@@ -241,7 +242,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 sendNotification(
                     title: s.dirName,
                     subtitle: "",
-                    body: "Stuck \u{2014} busy for \(formatAge(s.ageSeconds)) with no updates"
+                    body: "Stuck \u{2014} busy for \(formatAge(s.ageSeconds)) with no updates",
+                    cwd: s.cwd
                 )
             }
         }
@@ -262,7 +264,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             parts.isEmpty ? "MenubarCC \u{2014} no sessions" : parts.joined(separator: " \u{00B7} ")
     }
 
-    private func sendNotification(title: String, subtitle: String, body: String) {
+    private func sendNotification(title: String, subtitle: String, body: String, cwd: String = "") {
         let center = UNUserNotificationCenter.current()
         let content = UNMutableNotificationContent()
         content.title = title
@@ -270,10 +272,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         content.body = body
         // Group notifications per project in Notification Center
         content.threadIdentifier = title
+        // Carry the project path so tapping the banner can reopen the session.
+        if !cwd.isEmpty { content.userInfo = ["cwd": cwd] }
         let req = UNNotificationRequest(
             identifier: UUID().uuidString, content: content, trigger: nil
         )
         center.add(req)
+    }
+
+    // Tapping a banner jumps to the session it came from, using the same
+    // "On Session Click" behavior as a menu row.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        if let cwd = response.notification.request.content.userInfo["cwd"] as? String {
+            DispatchQueue.main.async { [weak self] in self?.openProject(cwd: cwd) }
+        }
+        completionHandler()
+    }
+
+    // Still show the banner if MenubarCC happens to be the active app (e.g. its
+    // menu is open). Sound is left to the hook, so don't request it here.
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list])
     }
 
     // MARK: - Menu
@@ -426,7 +453,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Clicking a session jumps to its project per the "On Session Click"
     // setting: switch to its Orca terminal, reveal in Finder, or copy the path.
     @objc private func openSession(_ sender: NSMenuItem) {
-        guard let cwd = sender.representedObject as? String, !cwd.isEmpty else { return }
+        guard let cwd = sender.representedObject as? String else { return }
+        openProject(cwd: cwd)
+    }
+
+    // Shared by a session-row click and a banner tap: jump to the project per
+    // the "On Session Click" setting — Orca terminal, Finder, or copy the path.
+    private func openProject(cwd: String) {
+        guard !cwd.isEmpty else { return }
         let action = loadAppSettings()["sessionClickAction"] as? String
             ?? (orcaAvailable() ? "orca" : "finder")
 
