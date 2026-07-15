@@ -5,13 +5,36 @@ import Cocoa
 // users are unaffected (the app falls back to Finder/clipboard per the
 // "On Session Click" setting).
 
-private let orcaCandidatePaths = [
+private let orcaBundleId = "com.stablyai.orca"
+// The CLI ships inside the app bundle; the /usr/local/bin shim is optional and
+// not present on every machine, so we locate the app itself as the primary path.
+private let orcaCLIRelPath = "Contents/Resources/bin/orca"
+
+private let orcaSymlinkPaths = [
     "/usr/local/bin/orca",
     "/opt/homebrew/bin/orca",
 ]
 
 func orcaBinaryPath() -> String? {
-    orcaCandidatePaths.first { FileManager.default.isExecutableFile(atPath: $0) }
+    let fm = FileManager.default
+
+    // 1. The CLI shim, if the user happens to have installed it.
+    if let p = orcaSymlinkPaths.first(where: { fm.isExecutableFile(atPath: $0) }) {
+        return p
+    }
+    // 2. Ask LaunchServices where Orca.app lives, then use its bundled CLI —
+    //    works wherever Orca is installed, with or without the shim.
+    if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: orcaBundleId) {
+        let cli = appURL.appendingPathComponent(orcaCLIRelPath).path
+        if fm.isExecutableFile(atPath: cli) { return cli }
+    }
+    // 3. Standard install locations as a last resort.
+    let home = fm.homeDirectoryForCurrentUser.path
+    for base in ["/Applications/Orca.app", "\(home)/Applications/Orca.app"] {
+        let cli = "\(base)/\(orcaCLIRelPath)"
+        if fm.isExecutableFile(atPath: cli) { return cli }
+    }
+    return nil
 }
 
 func orcaAvailable() -> Bool { orcaBinaryPath() != nil }
@@ -87,10 +110,13 @@ private func activateOrca() {
 }
 
 private func orcaAppURL() -> URL? {
+    // Ask LaunchServices directly — robust regardless of where Orca is installed.
+    if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: orcaBundleId) {
+        return url
+    }
+    // Fallback: derive the .app from the CLI path (resolving the shim symlink).
     guard let bin = orcaBinaryPath() else { return nil }
     let fm = FileManager.default
-    // Resolve the CLI symlink (…/Orca.app/Contents/Resources/bin/orca) so we
-    // can walk up to the .app bundle to activate it.
     var resolvedPath = bin
     if let dest = try? fm.destinationOfSymbolicLink(atPath: bin) {
         resolvedPath = dest.hasPrefix("/")
