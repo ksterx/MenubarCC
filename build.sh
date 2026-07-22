@@ -17,12 +17,21 @@ swiftc -O -whole-module-optimization \
     -o "${REPO_DIR}/MenubarCC-swift" \
     "${REPO_DIR}"/Sources/*.swift
 
+# Compile the statusline tap helper (Foundation only — kept small and fast, no
+# AppKit, because it runs on every statusline render).
+echo "==> Compiling statusline-tap..."
+swiftc -O \
+    -target arm64-apple-macos13.0 \
+    -o "${REPO_DIR}/statusline-tap" \
+    "${REPO_DIR}"/tap/statusline_tap.swift
+
 # Create .app bundle
 echo "==> Creating app bundle..."
 rm -rf "${REPO_DIR}/dist/MenubarCC.app"
-mkdir -p "${REPO_DIR}/dist/MenubarCC.app/Contents/"{MacOS,Resources}
+mkdir -p "${REPO_DIR}/dist/MenubarCC.app/Contents/"{MacOS,Resources,Helpers}
 
 cp "${REPO_DIR}/MenubarCC-swift" "${REPO_DIR}/dist/MenubarCC.app/Contents/MacOS/MenubarCC"
+cp "${REPO_DIR}/statusline-tap" "${REPO_DIR}/dist/MenubarCC.app/Contents/Helpers/statusline-tap"
 cp "${REPO_DIR}/menubarcc-icon.png" "${REPO_DIR}/dist/MenubarCC.app/Contents/Resources/"
 cp "${REPO_DIR}/menubarcc_hook.py" "${REPO_DIR}/dist/MenubarCC.app/Contents/Resources/"
 cp "${REPO_DIR}/MenubarCC.icns" "${REPO_DIR}/dist/MenubarCC.app/Contents/Resources/"
@@ -58,8 +67,11 @@ cat > "${REPO_DIR}/dist/MenubarCC.app/Contents/Info.plist" << PLIST
 </plist>
 PLIST
 
-# Sign
+# Sign (nested executables first, then the app bundle)
 echo "==> Signing..."
+codesign --force --options runtime --timestamp \
+    --sign "${IDENTITY}" \
+    "${REPO_DIR}/dist/MenubarCC.app/Contents/Helpers/statusline-tap"
 codesign --force --options runtime --timestamp \
     --sign "${IDENTITY}" \
     "${REPO_DIR}/dist/MenubarCC.app/Contents/MacOS/MenubarCC"

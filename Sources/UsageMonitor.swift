@@ -23,6 +23,23 @@ private let usageMaxAge: TimeInterval = 15 * 60
 // have gone cold so the directory can't grow without bound.
 private let usagePruneAge: TimeInterval = 24 * 3600
 
+// Final trust boundary: accept only a genuine finite number, clamped to a sane
+// percentage, so a bogus spooled value (e.g. 1e300) can't later trap Int(...).
+private func validPct(_ v: Any?) -> Double? {
+    guard let n = v as? Double, n.isFinite else { return nil }
+    return min(max(n, 0), 100)
+}
+
+// Reject anything that isn't a plain filename-safe id before using it in a path.
+private func isSafeSessionId(_ s: String) -> Bool {
+    let bytes = Array(s.utf8)
+    guard !bytes.isEmpty, bytes.count <= 128, s != ".", s != ".." else { return false }
+    return bytes.allSatisfy { b in
+        (b >= 0x30 && b <= 0x39) || (b >= 0x41 && b <= 0x5A) || (b >= 0x61 && b <= 0x7A)
+            || b == 0x2D || b == 0x5F || b == 0x2E
+    }
+}
+
 private func usageSnapshot(at url: URL) -> (dict: [String: Any], age: Double)? {
     guard let data = try? Data(contentsOf: url),
           let d = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -57,8 +74,8 @@ func loadRateLimits() -> RateLimitsSnapshot? {
     }
 
     guard let d = newest?.dict, let age = newest?.age, age <= usageMaxAge else { return nil }
-    let five = d["five_hour"] as? Double
-    let week = d["seven_day"] as? Double
+    let five = validPct(d["five_hour"])
+    let week = validPct(d["seven_day"])
     if five == nil && week == nil { return nil }
     return RateLimitsSnapshot(fiveHour: five, sevenDay: week)
 }
@@ -70,8 +87,8 @@ func loadRateLimits() -> RateLimitsSnapshot? {
 /// the spooled value stays accurate even when old; an active session re-renders
 /// its statusline and refreshes it. Bound only by the prune age.
 func statuslineContextPct(sessionId: String) -> Double? {
-    guard !sessionId.isEmpty else { return nil }
+    guard isSafeSessionId(sessionId) else { return nil }
     let url = usageDir.appendingPathComponent("\(sessionId).json")
     guard let snap = usageSnapshot(at: url), snap.age <= usagePruneAge else { return nil }
-    return snap.dict["context"] as? Double
+    return validPct(snap.dict["context"])
 }

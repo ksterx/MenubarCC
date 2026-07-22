@@ -78,6 +78,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
         UNUserNotificationCenter.current().delegate = self
         refreshNotifStatus()
         syncInstalledHookScript()
+        // Off the main thread: replacing a changed helper self-tests it, which
+        // must never block app launch.
+        DispatchQueue.global(qos: .utility).async { syncStatuslineTap() }
         startEventsWatcher()
 
         refreshState()
@@ -719,6 +722,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
         sub.addItem(buildLoginItemEntry())
         sub.addItem(.separator())
         sub.addItem(buildInstallMenu())
+        sub.addItem(buildUsageCaptureMenu())
 
         root.submenu = sub
         return root
@@ -1022,6 +1026,52 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
 
     @objc private func uninstallHookAction(_ sender: NSMenuItem) {
         let (ok, msg) = uninstallHooks()
+        showAlert(title: "MenubarCC", message: msg)
+        if ok { refreshState() }
+    }
+
+    // MARK: - Usage Capture (statusline tap for limit gauges)
+
+    private func buildUsageCaptureMenu() -> NSMenuItem {
+        let installed = usageCaptureInstalled()
+        let root = NSMenuItem(title: "Usage Capture", action: nil, keyEquivalent: "")
+        let sub = NSMenu()
+
+        let toggle = NSMenuItem(
+            title: installed ? "Disable Usage Capture" : "Enable Usage Capture\u{2026}",
+            action: installed ? #selector(disableUsageCaptureAction(_:))
+                              : #selector(enableUsageCaptureAction(_:)),
+            keyEquivalent: ""
+        )
+        toggle.target = self
+        sub.addItem(toggle)
+        sub.addItem(.separator())
+
+        let note = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        note.isEnabled = false
+        note.attributedTitle = NSAttributedString(
+            string: "Shows 5-hour and weekly limits in the menu by\n"
+                + "reading them from your statusline. Global sessions\n"
+                + "only; open sessions may need a restart.",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]
+        )
+        sub.addItem(note)
+
+        root.submenu = sub
+        return root
+    }
+
+    @objc private func enableUsageCaptureAction(_ sender: NSMenuItem) {
+        let (ok, msg) = installUsageCapture()
+        showAlert(title: "MenubarCC", message: msg)
+        if ok { refreshState() }
+    }
+
+    @objc private func disableUsageCaptureAction(_ sender: NSMenuItem) {
+        let (ok, msg) = uninstallUsageCapture()
         showAlert(title: "MenubarCC", message: msg)
         if ok { refreshState() }
     }

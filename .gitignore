@@ -7,4 +7,5 @@ __pycache__/
 *.dmg
 rw.*.dmg
 MenubarCC-swift
+statusline-tap
 native_launcher
