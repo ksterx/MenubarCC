@@ -9,6 +9,10 @@ struct SessionInfo {
     let isStuck: Bool
     let isWaiting: Bool
     let updatedAt: Double
+    // Context-window fill (0–100), read from the session transcript. Only
+    // populated when loadSessions is asked for it (menu open), since the tail
+    // read is too costly to run on every background poll. nil = unknown.
+    let contextPct: Double?
 }
 
 enum AnimState {
@@ -18,11 +22,21 @@ enum AnimState {
 private let sessionsDir = FileManager.default.homeDirectoryForCurrentUser
     .appendingPathComponent(".claude/sessions")
 
+private let projectsDir = FileManager.default.homeDirectoryForCurrentUser
+    .appendingPathComponent(".claude/projects")
+
+// Context-window sizes used as the denominator for the transcript-based fill
+// estimate. A single request can't exceed the window, so a turn over 200K must
+// be a 1M-context session; otherwise assume the standard 200K.
+private let stdContextWindow = 200_000.0
+private let bigContextWindow = 1_000_000.0
+
 // A session whose owning process is gone is a zombie (Claude crashed without a
 // clean SessionEnd). Age is only a fallback for sessions that carry no pid.
 private let maxSessionAge: TimeInterval = 12 * 3600
 
-func loadSessions(stuckSecs: Int, stuckEnabled: Bool) -> [SessionInfo] {
+func loadSessions(stuckSecs: Int, stuckEnabled: Bool,
+                  includeContext: Bool = false) -> [SessionInfo] {
     let fm = FileManager.default
     guard let files = try? fm.contentsOfDirectory(atPath: sessionsDir.path) else { return [] }
 
@@ -70,11 +84,13 @@ func loadSessions(stuckSecs: Int, stuckEnabled: Bool) -> [SessionInfo] {
         let isWaiting = status == "waiting"
             || (status == "idle" && fm.fileExists(atPath: waitingFlag.path))
 
+        let contextPct = includeContext ? sessionContextPct(sessionId: sid, cwd: cwd) : nil
+
         results.append(SessionInfo(
             sessionId: sid, status: status, cwd: cwd,
             dirName: dirName.isEmpty ? cwd : dirName,
             ageSeconds: ageS, isStuck: isStuck, isWaiting: isWaiting,
-            updatedAt: updatedAt
+            updatedAt: updatedAt, contextPct: contextPct
         ))
     }
 
@@ -125,6 +141,80 @@ func formatAge(_ secs: Double) -> String {
     if s < 60 { return "\(s)s" }
     if s < 3600 { return "\(s / 60)m" }
     return "\(s / 3600)h\((s % 3600) / 60)m"
+}
+
+// MARK: - Per-session context usage
+
+/// Fill of the context window (0–100) for a session. Prefers the exact figure
+/// Claude Code spooled from its statusline; otherwise estimates from the last
+/// assistant turn in the transcript. nil if neither is available.
+private func sessionContextPct(sessionId: String, cwd: String) -> Double? {
+    if let exact = statuslineContextPct(sessionId: sessionId) { return exact }
+    guard let url = transcriptURL(sessionId: sessionId, cwd: cwd),
+          let tokens = lastContextTokens(url: url) else { return nil }
+    let window = Double(tokens) > stdContextWindow ? bigContextWindow : stdContextWindow
+    return min(Double(tokens) / window * 100.0, 100.0)
+}
+
+/// The `<sessionId>.jsonl` transcript. Fast path: Claude derives the project
+/// directory from cwd by replacing "/" and "." with "-". If that guess misses
+/// (unusual path characters), fall back to scanning the project directories.
+private func transcriptURL(sessionId: String, cwd: String) -> URL? {
+    guard !sessionId.isEmpty else { return nil }
+    let fm = FileManager.default
+
+    if !cwd.isEmpty {
+        let encoded = cwd
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ".", with: "-")
+        let guess = projectsDir
+            .appendingPathComponent(encoded)
+            .appendingPathComponent("\(sessionId).jsonl")
+        if fm.fileExists(atPath: guess.path) { return guess }
+    }
+
+    guard let dirs = try? fm.contentsOfDirectory(
+        at: projectsDir, includingPropertiesForKeys: nil) else { return nil }
+    for dir in dirs {
+        let candidate = dir.appendingPathComponent("\(sessionId).jsonl")
+        if fm.fileExists(atPath: candidate.path) { return candidate }
+    }
+    return nil
+}
+
+/// Sum of input + cached tokens on the transcript's last assistant turn — the
+/// live context size. Transcripts run to tens of MB, so only the tail is read.
+private func lastContextTokens(url: URL) -> Int? {
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    defer { try? handle.close() }
+
+    let size = (try? handle.seekToEnd()) ?? 0
+    let window: UInt64 = 1_000_000  // 1 MB tail comfortably covers the last turn
+    let start = size > window ? size - window : 0
+    // Read one byte before the window (when not at the file start) so the byte
+    // preceding `start` tells us whether the window opens on a line boundary.
+    let readFrom = start > 0 ? start - 1 : 0
+    guard (try? handle.seek(toOffset: readFrom)) != nil,
+          let data = try? handle.readToEnd(), !data.isEmpty else { return nil }
+
+    var lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+    // If the byte before the window isn't a newline, the window opened mid-line
+    // and that first fragment isn't valid JSON — drop it. On an exact boundary
+    // (preceding byte is a newline) the first record is whole, so keep it.
+    if start > 0, data.first != 0x0A, !lines.isEmpty { lines.removeFirst() }
+
+    for lineData in lines.reversed() {
+        guard let obj = try? JSONSerialization.jsonObject(with: Data(lineData)) as? [String: Any],
+              obj["type"] as? String == "assistant",
+              let msg = obj["message"] as? [String: Any],
+              let usage = msg["usage"] as? [String: Any] else { continue }
+        let input = usage["input_tokens"] as? Int ?? 0
+        let cacheRead = usage["cache_read_input_tokens"] as? Int ?? 0
+        let cacheCreate = usage["cache_creation_input_tokens"] as? Int ?? 0
+        let total = input + cacheRead + cacheCreate
+        return total > 0 ? total : nil
+    }
+    return nil
 }
 
 func determineAnimState(sessions: [SessionInfo]) -> AnimState {

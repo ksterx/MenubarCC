@@ -306,7 +306,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
     // MARK: - Menu
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        let ss = loadSessions(stuckSecs: stuckSecs, stuckEnabled: stuckEnabled)
+        let ss = loadSessions(stuckSecs: stuckSecs, stuckEnabled: stuckEnabled,
+                              includeContext: true)
         let stuck   = ss.filter { $0.isStuck }
         let busy    = ss.filter { $0.status == "busy" && !$0.isStuck }
         let waiting = ss.filter { $0.isWaiting }
@@ -323,6 +324,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
         waiting: [SessionInfo], idle: [SessionInfo]
     ) {
         menu.removeAllItems()
+
+        // Account-wide usage limits, when a fresh statusline snapshot exists.
+        if let rl = loadRateLimits() {
+            addUsageSection(menu, rl)
+            menu.addItem(.separator())
+        }
 
         if sessions.isEmpty {
             let item = NSMenuItem(title: "No sessions", action: nil, keyEquivalent: "")
@@ -350,6 +357,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
             action: #selector(soundsToggled(_:))
         )
         menu.addItem(soundsItem)
+
+        // Volume lives right under Sounds while sounds are on — there's nothing
+        // to set while muted, so it collapses away.
+        if !muted {
+            let volume = cfg["volume"] as? Double ?? 1.0
+            let volumeItem = NSMenuItem()
+            volumeItem.view = makeSliderView(
+                title: "Volume",
+                value: volume,
+                enabled: true,
+                target: self,
+                action: #selector(volumeChanged(_:))
+            )
+            menu.addItem(volumeItem)
+        }
 
         // The switch shows the EFFECTIVE state: app setting AND OS permission.
         let bannersItem = NSMenuItem()
@@ -436,18 +458,136 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
         menu.addItem(header)
 
         for s in sessions {
-            let title = "        \(s.dirName)   \(formatAge(s.ageSeconds))"
             let item = NSMenuItem(
-                title: title,
+                title: "        \(s.dirName)   \(formatAge(s.ageSeconds))",
                 action: #selector(openSession(_:)),
                 keyEquivalent: ""
             )
+            item.attributedTitle = sessionItemTitle(s)
             item.target = self
             item.representedObject = s.cwd as NSString
             item.toolTip = s.cwd   // full path disambiguates same-named dirs
             menu.addItem(item)
         }
         menu.addItem(.separator())
+    }
+
+    // A session row: indented name, dim age, and a context-fill mini-bar with
+    // its percentage — colored green/amber/red by how full the window is.
+    private func sessionItemTitle(_ s: SessionInfo) -> NSAttributedString {
+        let base: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: 13)]
+        let result = NSMutableAttributedString(
+            string: "        \(s.dirName)   ", attributes: base)
+        result.append(NSAttributedString(
+            string: formatAge(s.ageSeconds),
+            attributes: [
+                .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular),
+                .foregroundColor: NSColor.tertiaryLabelColor,
+            ]))
+
+        if let pct = s.contextPct {
+            result.append(NSAttributedString(string: "   ", attributes: base))
+            let bar = NSTextAttachment()
+            bar.image = contextBarImage(pct: pct)
+            bar.bounds = CGRect(x: 0, y: -1, width: 34, height: 6)
+            result.append(NSAttributedString(attachment: bar))
+            result.append(NSAttributedString(
+                string: " \(Int(pct.rounded()))%",
+                attributes: [
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
+                    .foregroundColor: gaugeColor(pct),
+                ]))
+        }
+        return result
+    }
+
+    // MARK: - Usage gauges
+
+    private func gaugeColor(_ pct: Double) -> NSColor {
+        if pct < 50 { return .systemGreen }
+        if pct < 80 { return .systemOrange }
+        return .systemRed
+    }
+
+    private func addUsageSection(_ menu: NSMenu, _ rl: RateLimitsSnapshot) {
+        let header = NSMenuItem(title: "USAGE", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        header.attributedTitle = NSAttributedString(
+            string: "USAGE",
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ])
+        menu.addItem(header)
+
+        if let five = rl.fiveHour {
+            let item = NSMenuItem()
+            item.view = makeGaugeView(title: "5-hour limit", pct: five)
+            menu.addItem(item)
+        }
+        if let week = rl.sevenDay {
+            let item = NSMenuItem()
+            item.view = makeGaugeView(title: "Weekly limit", pct: week)
+            menu.addItem(item)
+        }
+    }
+
+    private func makeGaugeView(title: String, pct: Double) -> NSView {
+        let width: CGFloat = 260, height: CGFloat = 36
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        let color = gaugeColor(pct)
+
+        let titleField = NSTextField(labelWithString: title)
+        titleField.frame = NSRect(x: 14, y: 18, width: 150, height: 16)
+        titleField.font = NSFont.menuFont(ofSize: 13)
+        view.addSubview(titleField)
+
+        let pctField = NSTextField(labelWithString: "\(Int(pct.rounded()))%")
+        pctField.alignment = .right
+        pctField.frame = NSRect(x: width - 70, y: 18, width: 56, height: 16)
+        pctField.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+        pctField.textColor = color
+        view.addSubview(pctField)
+
+        let trackW = width - 28
+        let track = NSView(frame: NSRect(x: 14, y: 9, width: trackW, height: 6))
+        track.wantsLayer = true
+        track.layer?.backgroundColor =
+            NSColor.tertiaryLabelColor.withAlphaComponent(0.25).cgColor
+        track.layer?.cornerRadius = 3
+        view.addSubview(track)
+
+        let clamped = CGFloat(min(max(pct, 0), 100) / 100)
+        // A minimum sliver keeps a small non-zero value visible, but a true 0%
+        // must render empty.
+        let fillW = clamped > 0 ? max(4, trackW * clamped) : 0
+        let fill = NSView(frame: NSRect(x: 0, y: 0, width: fillW, height: 6))
+        fill.wantsLayer = true
+        fill.layer?.backgroundColor = color.cgColor
+        fill.layer?.cornerRadius = 3
+        track.addSubview(fill)
+
+        return view
+    }
+
+    // A tiny rounded track+fill drawn for inline use in a session row's title.
+    private func contextBarImage(pct: Double) -> NSImage {
+        let w: CGFloat = 34, h: CGFloat = 6
+        let color = gaugeColor(pct)
+        let img = NSImage(size: NSSize(width: w, height: h))
+        img.lockFocus()
+        NSColor.tertiaryLabelColor.withAlphaComponent(0.3).setFill()
+        NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: w, height: h),
+                     xRadius: 3, yRadius: 3).fill()
+        let clamped = CGFloat(min(max(pct, 0), 100) / 100)
+        if clamped > 0 {  // a true 0% leaves the track empty
+            let fw = max(3, w * clamped)
+            color.setFill()
+            NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: fw, height: h),
+                         xRadius: 3, yRadius: 3).fill()
+        }
+        img.unlockFocus()
+        return img
     }
 
     // Clicking a session jumps to its project per the "On Session Click"
@@ -541,6 +681,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
     @objc private func soundsToggled(_ sender: NSSwitch) {
         updateHookConfig(["muteAll": sender.state != .on])
         refreshState()
+        // Rebuild the still-open menu so the volume row shows/hides immediately.
+        // Async so it runs after this switch's own event finishes.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self, let menu = self.statusItem.menu else { return }
+            self.menuNeedsUpdate(menu)
+        }
     }
 
     @objc private func responsePreviewToggled(_ sender: NSSwitch) {
@@ -596,18 +742,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
             if muted { item.action = nil }
             sub.addItem(item)
         }
-        sub.addItem(.separator())
-
-        let volume = cfg["volume"] as? Double ?? 1.0
-        let volumeItem = NSMenuItem()
-        volumeItem.view = makeSliderView(
-            title: "Volume",
-            value: volume,
-            enabled: !muted,
-            target: self,
-            action: #selector(volumeChanged(_:))
-        )
-        sub.addItem(volumeItem)
         sub.addItem(.separator())
 
         for (event, _) in controlledHookEvents {
