@@ -350,7 +350,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
         let cfg = loadHookConfig()
         let muted = cfg["muteAll"] as? Bool ?? false
         let banners = cfg["bannersEnabled"] as? Bool ?? true
-        let responsePreview = cfg["responsePreviewEnabled"] as? Bool ?? true
 
         let soundsItem = NSMenuItem()
         soundsItem.view = makeSwitchView(
@@ -385,17 +384,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
             action: #selector(bannersToggled(_:))
         )
         menu.addItem(bannersItem)
-
-        // Preview the reply's opening in the Stop banner body. Only meaningful
-        // while banners are on, but kept as an independent switch like the rest.
-        let previewItem = NSMenuItem()
-        previewItem.view = makeSwitchView(
-            title: "Response Preview",
-            isOn: responsePreview,
-            target: self,
-            action: #selector(responsePreviewToggled(_:))
-        )
-        menu.addItem(previewItem)
 
         // Only surface the permission problem when it actually blocks banners.
         if banners && !notifAuthorized {
@@ -461,47 +449,60 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
         menu.addItem(header)
 
         for s in sessions {
-            let item = NSMenuItem(
-                title: "        \(s.dirName)   \(formatAge(s.ageSeconds))",
-                action: #selector(openSession(_:)),
-                keyEquivalent: ""
-            )
-            item.attributedTitle = sessionItemTitle(s)
-            item.target = self
-            item.representedObject = s.cwd as NSString
-            item.toolTip = s.cwd   // full path disambiguates same-named dirs
+            let item = NSMenuItem()
+            item.view = makeSessionRowView(s)
             menu.addItem(item)
         }
         menu.addItem(.separator())
     }
 
-    // A session row: indented name, dim age, and a context-fill mini-bar with
-    // its percentage — colored green/amber/red by how full the window is.
-    private func sessionItemTitle(_ s: SessionInfo) -> NSAttributedString {
-        let base: [NSAttributedString.Key: Any] = [.font: NSFont.menuFont(ofSize: 13)]
-        let result = NSMutableAttributedString(
-            string: "        \(s.dirName)   ", attributes: base)
-        result.append(NSAttributedString(
-            string: formatAge(s.ageSeconds),
-            attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular),
-                .foregroundColor: NSColor.tertiaryLabelColor,
-            ]))
+    // Fixed-column row so name / age / context line up across sessions and the
+    // context reaches the same right edge (246) as the gauges above.
+    private func makeSessionRowView(_ s: SessionInfo) -> NSView {
+        let width: CGFloat = 260, height: CGFloat = 22
+        let row = SessionRowView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        row.toolTip = s.cwd   // full path disambiguates same-named dirs
+        row.onClick = { [weak self] in self?.openProject(cwd: s.cwd) }
+
+        let name = NSTextField(labelWithString: s.dirName)
+        name.frame = NSRect(x: 28, y: 3, width: 94, height: 16)
+        name.font = NSFont.menuFont(ofSize: 13)
+        name.lineBreakMode = .byTruncatingTail
+        name.cell?.truncatesLastVisibleLine = true
+        row.addSubview(name)
+
+        let age = NSTextField(labelWithString: formatAge(s.ageSeconds))
+        age.frame = NSRect(x: 124, y: 4, width: 46, height: 14)
+        age.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        age.textColor = .tertiaryLabelColor
+        age.alignment = .right
+        row.addSubview(age)
 
         if let pct = s.contextPct {
-            result.append(NSAttributedString(string: "   ", attributes: base))
-            let bar = NSTextAttachment()
-            bar.image = contextBarImage(pct: pct)
-            bar.bounds = CGRect(x: 0, y: -1, width: 34, height: 6)
-            result.append(NSAttributedString(attachment: bar))
-            result.append(NSAttributedString(
-                string: " \(Int(pct.rounded()))%",
-                attributes: [
-                    .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium),
-                    .foregroundColor: gaugeColor(pct),
-                ]))
+            let color = gaugeColor(pct)
+            let trackW: CGFloat = 34
+            let track = NSView(frame: NSRect(x: 176, y: 8, width: trackW, height: 6))
+            track.wantsLayer = true
+            track.layer?.backgroundColor =
+                NSColor.tertiaryLabelColor.withAlphaComponent(0.25).cgColor
+            track.layer?.cornerRadius = 3
+            let clamped = CGFloat(min(max(pct, 0), 100) / 100)
+            let fill = NSView(frame: NSRect(
+                x: 0, y: 0, width: clamped > 0 ? max(4, trackW * clamped) : 0, height: 6))
+            fill.wantsLayer = true
+            fill.layer?.backgroundColor = color.cgColor
+            fill.layer?.cornerRadius = 3
+            track.addSubview(fill)
+            row.addSubview(track)
+
+            let pctField = NSTextField(labelWithString: "\(Int(pct.rounded()))%")
+            pctField.frame = NSRect(x: 212, y: 4, width: 34, height: 14)
+            pctField.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
+            pctField.textColor = color
+            pctField.alignment = .right
+            row.addSubview(pctField)
         }
-        return result
+        return row
     }
 
     // MARK: - Usage gauges
@@ -523,81 +524,51 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
             ])
         menu.addItem(header)
 
-        if let five = rl.fiveHour {
-            let item = NSMenuItem()
-            item.view = makeGaugeView(title: "5-hour limit", pct: five)
-            menu.addItem(item)
-        }
-        if let week = rl.sevenDay {
-            let item = NSMenuItem()
-            item.view = makeGaugeView(title: "Weekly limit", pct: week)
-            menu.addItem(item)
-        }
+        var rings: [(pct: Double, caption: String)] = []
+        if let five = rl.fiveHour { rings.append((five, "5-hour")) }
+        if let week = rl.sevenDay { rings.append((week, "Weekly")) }
+        guard !rings.isEmpty else { return }
+
+        let item = NSMenuItem()
+        item.view = makeUsageRingsView(rings)
+        menu.addItem(item)
     }
 
-    private func makeGaugeView(title: String, pct: Double) -> NSView {
-        let width: CGFloat = 260, height: CGFloat = 36
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
-        let color = gaugeColor(pct)
+    // The limits as side-by-side progress rings: percentage centered inside,
+    // caption beneath, colored green/amber/red by fill.
+    private func makeUsageRingsView(_ rings: [(pct: Double, caption: String)]) -> NSView {
+        let width: CGFloat = 260, height: CGFloat = 96
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        let diameter: CGFloat = 66
+        let ringY: CGFloat = 26
 
-        let titleField = NSTextField(labelWithString: title)
-        titleField.frame = NSRect(x: 14, y: 18, width: 150, height: 16)
-        titleField.font = NSFont.menuFont(ofSize: 13)
-        view.addSubview(titleField)
+        // Evenly space each ring's center across the width.
+        for (i, ring) in rings.enumerated() {
+            let cx = width * (CGFloat(i) + 0.5) / CGFloat(rings.count)
+            let color = gaugeColor(ring.pct)
 
-        let pctField = NSTextField(labelWithString: "\(Int(pct.rounded()))%")
-        pctField.alignment = .right
-        pctField.frame = NSRect(x: width - 70, y: 18, width: 56, height: 16)
-        pctField.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
-        pctField.textColor = color
-        view.addSubview(pctField)
+            let ringView = RingView(frame: NSRect(x: cx - diameter / 2, y: ringY,
+                                                  width: diameter, height: diameter))
+            ringView.pct = ring.pct
+            ringView.color = color
+            ringView.lineWidth = 6
+            container.addSubview(ringView)
 
-        let trackW = width - 28
-        let track = NSView(frame: NSRect(x: 14, y: 9, width: trackW, height: 6))
-        track.wantsLayer = true
-        track.layer?.backgroundColor =
-            NSColor.tertiaryLabelColor.withAlphaComponent(0.25).cgColor
-        track.layer?.cornerRadius = 3
-        view.addSubview(track)
+            let pctLabel = NSTextField(labelWithString: "\(Int(ring.pct.rounded()))%")
+            pctLabel.font = .monospacedDigitSystemFont(ofSize: 17, weight: .semibold)
+            pctLabel.textColor = color
+            pctLabel.alignment = .center
+            pctLabel.frame = NSRect(x: cx - 34, y: ringY + diameter / 2 - 11, width: 68, height: 22)
+            container.addSubview(pctLabel)
 
-        let clamped = CGFloat(min(max(pct, 0), 100) / 100)
-        // A minimum sliver keeps a small non-zero value visible, but a true 0%
-        // must render empty.
-        let fillW = clamped > 0 ? max(4, trackW * clamped) : 0
-        let fill = NSView(frame: NSRect(x: 0, y: 0, width: fillW, height: 6))
-        fill.wantsLayer = true
-        fill.layer?.backgroundColor = color.cgColor
-        fill.layer?.cornerRadius = 3
-        track.addSubview(fill)
-
-        return view
-    }
-
-    // A tiny rounded track+fill drawn for inline use in a session row's title.
-    private func contextBarImage(pct: Double) -> NSImage {
-        let w: CGFloat = 34, h: CGFloat = 6
-        let color = gaugeColor(pct)
-        let img = NSImage(size: NSSize(width: w, height: h))
-        img.lockFocus()
-        NSColor.tertiaryLabelColor.withAlphaComponent(0.3).setFill()
-        NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: w, height: h),
-                     xRadius: 3, yRadius: 3).fill()
-        let clamped = CGFloat(min(max(pct, 0), 100) / 100)
-        if clamped > 0 {  // a true 0% leaves the track empty
-            let fw = max(3, w * clamped)
-            color.setFill()
-            NSBezierPath(roundedRect: NSRect(x: 0, y: 0, width: fw, height: h),
-                         xRadius: 3, yRadius: 3).fill()
+            let cap = NSTextField(labelWithString: ring.caption)
+            cap.font = .systemFont(ofSize: 11)
+            cap.textColor = .secondaryLabelColor
+            cap.alignment = .center
+            cap.frame = NSRect(x: cx - 45, y: 6, width: 90, height: 14)
+            container.addSubview(cap)
         }
-        img.unlockFocus()
-        return img
-    }
-
-    // Clicking a session jumps to its project per the "On Session Click"
-    // setting: switch to its Orca terminal, reveal in Finder, or copy the path.
-    @objc private func openSession(_ sender: NSMenuItem) {
-        guard let cwd = sender.representedObject as? String else { return }
-        openProject(cwd: cwd)
+        return container
     }
 
     // Shared by a session-row click and a banner tap: jump to the project per
@@ -692,8 +663,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
         }
     }
 
-    @objc private func responsePreviewToggled(_ sender: NSSwitch) {
-        updateHookConfig(["responsePreviewEnabled": sender.state == .on])
+    // Preview the reply's opening in the Stop banner body. Defaults on.
+    private func buildResponsePreviewItem() -> NSMenuItem {
+        let on = loadHookConfig()["responsePreviewEnabled"] as? Bool ?? true
+        let item = NSMenuItem(
+            title: "Response Preview",
+            action: #selector(toggleResponsePreview(_:)),
+            keyEquivalent: ""
+        )
+        item.state = on ? .on : .off
+        item.target = self
+        return item
+    }
+
+    @objc private func toggleResponsePreview(_ sender: NSMenuItem) {
+        let current = loadHookConfig()["responsePreviewEnabled"] as? Bool ?? true
+        updateHookConfig(["responsePreviewEnabled": !current])
         refreshState()
     }
 
@@ -715,6 +700,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
         let sub = NSMenu()
 
         sub.addItem(buildSoundMenu())
+        sub.addItem(buildResponsePreviewItem())
         sub.addItem(buildSpeedMenu())
         sub.addItem(buildStuckMenu())
         sub.addItem(buildSessionClickMenu())
