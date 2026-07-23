@@ -8,6 +8,8 @@ private let refreshSecs: TimeInterval = 10
 private let defaultAnimFps: Double = 0.12
 private let defaultStuckSecs = 600
 private let firstRunPromptDelay: TimeInterval = 2.0
+private let updateCheckDelay: TimeInterval = 8.0
+private let updateCheckInterval: TimeInterval = 24 * 3600
 
 let speedPresets: [(label: String, interval: Double)] = [
     ("Very Slow", 0.30), ("Slow", 0.20), ("Normal", 0.12),
@@ -19,6 +21,13 @@ let stuckPresets: [(label: String, secs: Int)] = [
     ("30 minutes", 1800), ("60 minutes", 3600),
 ]
 
+// Mirrors DEFAULT_SOUNDS in menubarcc_hook.py so previews match what plays.
+private let defaultSoundPaths: [String: String] = [
+    "Stop":              "/System/Library/Sounds/Glass.aiff",
+    "Notification":      "/System/Library/Sounds/Tink.aiff",
+    "PermissionRequest": "/System/Library/Sounds/Funk.aiff",
+]
+
 // MARK: - AppDelegate
 
 class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
@@ -26,6 +35,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
     private var frames: AnimationFrames!
     private var animTimer: Timer?
     private var refreshTimer: Timer?
+    private var updateTimer: Timer?
+    // A newer release found by a background check, surfaced at the top of the menu.
+    private var availableUpdate: String?
+    // The most recent sound preview, so a new one can cut off the last.
+    private var previewProcess: Process?
 
     private var animState: AnimState = .idle
     private var animIdx = 0
@@ -87,6 +101,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
 
         DispatchQueue.main.asyncAfter(deadline: .now() + firstRunPromptDelay) {
             [weak self] in self?.firstRunCheck()
+        }
+
+        // Update checks: shortly after launch, then once a day. Both only look;
+        // downloading and restarting still require the user's confirmation.
+        DispatchQueue.main.asyncAfter(deadline: .now() + updateCheckDelay) {
+            [weak self] in self?.backgroundUpdateCheck()
+        }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: updateCheckInterval, repeats: true) {
+            [weak self] _ in self?.backgroundUpdateCheck()
         }
     }
 
@@ -328,6 +351,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
     ) {
         menu.removeAllItems()
 
+        // Top notices: an available update, and one-tap nudges to turn on
+        // features a user may not have discovered.
+        addNoticesSection(menu)
+
         // Account-wide usage limits, when a fresh statusline snapshot exists.
         if let rl = loadRateLimits() {
             addUsageSection(menu, rl)
@@ -460,7 +487,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
     // context reaches the same right edge (246) as the gauges above.
     private func makeSessionRowView(_ s: SessionInfo) -> NSView {
         let width: CGFloat = 260, height: CGFloat = 22
-        let row = SessionRowView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        let row = MenuRowView(frame: NSRect(x: 0, y: 0, width: width, height: height))
         row.toolTip = s.cwd   // full path disambiguates same-named dirs
         row.onClick = { [weak self] in self?.openProject(cwd: s.cwd) }
 
@@ -502,6 +529,50 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
             pctField.alignment = .right
             row.addSubview(pctField)
         }
+        return row
+    }
+
+    // MARK: - Top notices (update + feature nudges)
+
+    private func addNoticesSection(_ menu: NSMenu) {
+        var added = false
+
+        func notice(_ text: String, _ action: @escaping () -> Void) {
+            let item = NSMenuItem()
+            item.view = makeNoticeRow(text, action: action)
+            menu.addItem(item)
+            added = true
+        }
+
+        if let tag = availableUpdate {
+            notice("\u{2191}  Update to \(tag)\u{2026}") { [weak self] in self?.confirmAndApply(tag: tag) }
+        }
+        if !hooksAreInstalled() {
+            notice("\u{25C7}  Enable sounds & waiting alerts\u{2026}") {
+                [weak self] in self?.installHookAction(NSMenuItem())
+            }
+        }
+        if !usageCaptureInstalled() {
+            notice("\u{25C7}  Show usage limits in the menu\u{2026}") {
+                [weak self] in self?.enableUsageCaptureAction(NSMenuItem())
+            }
+        }
+
+        if added { menu.addItem(.separator()) }
+    }
+
+    // A full-width accent row so long notice text can't widen the whole menu.
+    private func makeNoticeRow(_ text: String, action: @escaping () -> Void) -> NSView {
+        let width: CGFloat = 260, height: CGFloat = 24
+        let row = MenuRowView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        row.onClick = action
+        let label = NSTextField(labelWithString: text)
+        label.frame = NSRect(x: 18, y: 4, width: width - 32, height: 16)
+        label.font = NSFont.menuFont(ofSize: 13)
+        label.textColor = .controlAccentColor
+        label.lineBreakMode = .byTruncatingTail
+        label.cell?.truncatesLastVisibleLine = true
+        row.addSubview(label)
         return row
     }
 
@@ -706,12 +777,33 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
         sub.addItem(buildSessionClickMenu())
         sub.addItem(.separator())
         sub.addItem(buildLoginItemEntry())
+        sub.addItem(buildAutoUpdateItem())
         sub.addItem(.separator())
         sub.addItem(buildInstallMenu())
         sub.addItem(buildUsageCaptureMenu())
 
         root.submenu = sub
         return root
+    }
+
+    private func buildAutoUpdateItem() -> NSMenuItem {
+        let item = NSMenuItem(
+            title: "Automatically Check for Updates",
+            action: #selector(toggleAutoUpdate(_:)),
+            keyEquivalent: ""
+        )
+        item.state = autoUpdateEnabled() ? .on : .off
+        item.target = self
+        return item
+    }
+
+    @objc private func toggleAutoUpdate(_ sender: NSMenuItem) {
+        var settings = loadAppSettings()
+        let now = !(settings["autoCheckUpdates"] as? Bool ?? true)
+        settings["autoCheckUpdates"] = now
+        saveAppSettings(settings)
+        // Turning it on gets an immediate check so the menu can react promptly.
+        if now { backgroundUpdateCheck() }
     }
 
     // MARK: - Sound submenu
@@ -721,7 +813,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
         let sub = NSMenu()
         let cfg = loadHookConfig()
         let muted = cfg["muteAll"] as? Bool ?? false
-        let soundPaths = cfg["soundPaths"] as? [String: Any] ?? [:]
 
         for (event, label) in controlledHookEvents {
             let enabled = isEventEnabled(cfg, event: event)
@@ -735,15 +826,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
         sub.addItem(.separator())
 
         for (event, _) in controlledHookEvents {
-            let custom = soundPaths[event] as? String
-            let suffix = custom != nil ? "  (\(URL(fileURLWithPath: custom!).lastPathComponent))" : "  (Default)"
-            let item = NSMenuItem(
-                title: "Choose \(event) sound\u{2026}\(suffix)",
-                action: #selector(chooseSound(_:)),
-                keyEquivalent: ""
-            )
-            item.representedObject = event as NSString
-            item.target = self
+            let item = NSMenuItem()
+            item.view = makeSoundRow(event: event, cfg: cfg)
             sub.addItem(item)
         }
         sub.addItem(.separator())
@@ -758,6 +842,63 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
 
         root.submenu = sub
         return root
+    }
+
+    // One row per event: a play icon that auditions the current sound (menu
+    // stays open) sharing the line with "Choose … sound…" (opens the picker).
+    private func makeSoundRow(event: String, cfg: [String: Any]) -> NSView {
+        let width: CGFloat = 330, height: CGFloat = 22
+        let row = MenuRowView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        let hasSound = resolveSoundPath(event: event, cfg: cfg) != nil
+
+        let iconZone = NSRect(x: 8, y: 0, width: 28, height: height)
+        if hasSound {
+            row.hotZone = iconZone
+            row.hotAction = { [weak self] in self?.previewEventSound(event) }
+        }
+        row.onClick = { [weak self] in self?.chooseSoundForEvent(event) }
+
+        let icon = NSTextField(labelWithString: "\u{25B6}\u{FE0E}")
+        icon.frame = NSRect(x: 14, y: 3, width: 16, height: 16)
+        icon.font = NSFont.menuFont(ofSize: 12)
+        icon.textColor = hasSound ? .controlAccentColor : .disabledControlTextColor
+        row.addSubview(icon)
+
+        let custom = (cfg["soundPaths"] as? [String: Any])?[event] as? String
+        let name = custom != nil ? URL(fileURLWithPath: custom!).lastPathComponent : "Default"
+        let text = NSTextField(labelWithString: "Choose \(event) sound\u{2026}  (\(name))")
+        text.frame = NSRect(x: 38, y: 3, width: width - 48, height: 16)
+        text.font = NSFont.menuFont(ofSize: 13)
+        text.lineBreakMode = .byTruncatingTail
+        text.cell?.truncatesLastVisibleLine = true
+        row.addSubview(text)
+        return row
+    }
+
+    // Resolve the sound the hook would play for this event: custom if set and
+    // present, else the system default. Mirrors _resolve_sound_path in the hook.
+    private func resolveSoundPath(event: String, cfg: [String: Any]) -> String? {
+        let fm = FileManager.default
+        if let custom = (cfg["soundPaths"] as? [String: Any])?[event] as? String, !custom.isEmpty {
+            let p = (custom as NSString).expandingTildeInPath
+            if fm.fileExists(atPath: p) { return p }
+        }
+        if let def = defaultSoundPaths[event], fm.fileExists(atPath: def) { return def }
+        return nil
+    }
+
+    private func previewEventSound(_ event: String) {
+        let cfg = loadHookConfig()
+        guard let path = resolveSoundPath(event: event, cfg: cfg) else { return }
+        let volume = cfg["volume"] as? Double ?? 1.0
+        previewProcess?.terminate()   // cut off any preview still playing
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/afplay")
+        p.arguments = ["-v", String(max(0, min(1, volume))), path]
+        p.standardOutput = FileHandle.nullDevice
+        p.standardError = FileHandle.nullDevice
+        try? p.run()
+        previewProcess = p
     }
 
     @objc private func volumeChanged(_ sender: NSSlider) {
@@ -775,8 +916,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
         refreshState()
     }
 
-    @objc private func chooseSound(_ sender: NSMenuItem) {
-        guard let event = sender.representedObject as? String else { return }
+    private func chooseSoundForEvent(_ event: String) {
         guard let path = promptSoundFile() else { return }
         if let stored = copySoundIntoAppSupport(src: path, eventName: event) {
             var cfg = loadHookConfig()
@@ -1096,12 +1236,31 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
 
     // MARK: - Update check
 
+    func autoUpdateEnabled() -> Bool {
+        loadAppSettings()["autoCheckUpdates"] as? Bool ?? true
+    }
+
+    // Silent look for a newer release; if found, remember it so the menu shows
+    // "Update to …". Never prompts or downloads on its own.
+    private func backgroundUpdateCheck() {
+        guard autoUpdateEnabled() else { return }
+        fetchLatestRelease { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self = self, let tag = result?.tag, !tag.isEmpty else { return }
+                // The menu is rebuilt on open, so recording the tag is enough for
+                // its "Update to …" item to appear next time it's opened.
+                self.availableUpdate = compareVersions(tag, "v\(currentVersion())") > 0 ? tag : nil
+            }
+        }
+    }
+
     @objc private func checkUpdates(_ sender: NSMenuItem) {
         fetchLatestRelease { [weak self] result in
             DispatchQueue.main.async { self?.onUpdateResult(result) }
         }
     }
 
+    // The manual "Check for Updates…" path: reports every outcome out loud.
     private func onUpdateResult(_ result: (tag: String, url: String)?) {
         let current = currentVersion()
         guard let result = result else {
@@ -1115,20 +1274,25 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifi
             return
         }
         if compareVersions(result.tag, "v\(current)") <= 0 {
+            availableUpdate = nil
             showAlert(title: "MenubarCC", message: "You're up to date (v\(current)).")
             return
         }
+        availableUpdate = result.tag
+        confirmAndApply(tag: result.tag)
+    }
 
+
+    private func confirmAndApply(tag: String) {
         let alert = NSAlert()
-        alert.messageText = "MenubarCC \(result.tag) is available"
+        alert.messageText = "MenubarCC \(tag) is available"
         alert.informativeText =
-            "You're on v\(current). Download and install it now? " +
+            "You're on v\(currentVersion()). Download and install it now? " +
             "MenubarCC will restart automatically."
         alert.addButton(withTitle: "Update Now")
         alert.addButton(withTitle: "Later")
-
         if alert.runModal() == .alertFirstButtonReturn {
-            applyUpdate(tag: result.tag)
+            applyUpdate(tag: tag)
         }
     }
 
